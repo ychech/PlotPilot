@@ -46,6 +46,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSON
 from starlette.requests import Request
 import threading
 import multiprocessing
+from multiprocessing.managers import SyncManager
 import signal
 
 # Core module
@@ -320,7 +321,7 @@ _daemon_stop_event = None
 
 # ── 跨进程共享状态字典（核心架构：状态走内存，数据走磁盘）──
 # 在启动守护进程前初始化，供 API 进程零 DB IO 读取实时状态
-_mp_manager: multiprocessing.Manager | None = None
+_mp_manager: SyncManager | None = None
 _shared_state: dict | None = None
 
 

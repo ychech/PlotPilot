@@ -697,8 +697,36 @@ def register_persistence_handlers() -> None:
 
     pq.register_handler(PersistenceCommandType.UPDATE_STORYLINES.value, handle_update_storylines)
 
+    # 🔥 叙事知识更新处理器
+    def handle_update_knowledge(payload: Dict) -> None:
+        """处理叙事知识更新"""
+        try:
+            import json
+            from infrastructure.persistence.database.connection import get_database
+
+            db = get_database()
+            novel_id = payload.get("novel_id")
+            knowledge = payload.get("knowledge", {})
+
+            # 序列化 knowledge dict 为 JSON
+            knowledge_json = json.dumps(knowledge, ensure_ascii=False, default=str)
+
+            db.execute(
+                """INSERT INTO knowledge (id, novel_id, premise_lock, updated_at)
+                   VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(novel_id) DO UPDATE SET
+                       premise_lock = excluded.premise_lock,
+                       updated_at = CURRENT_TIMESTAMP""",
+                (f"knowledge-{novel_id}", novel_id, knowledge_json),
+            )
+            logger.debug(f"[PersistenceQueue] 叙事知识已持久化: novel={novel_id}")
+        except Exception as e:
+            logger.error(f"[PersistenceQueue] 叙事知识持久化失败: {e}")
+
+    pq.register_handler(PersistenceCommandType.UPDATE_KNOWLEDGE.value, handle_update_knowledge)
+
     logger.info(
         "✅ 持久化处理器已注册: execute_sql, txn_batch, delete_chapter, upsert_chapter, "
         "update_chapter_tension, patch_novel, update_novel_state, update_chapter_status, "
-        "update_foreshadows, update_storylines"
+        "update_foreshadows, update_storylines, update_knowledge"
     )

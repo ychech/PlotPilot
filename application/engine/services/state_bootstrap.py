@@ -343,6 +343,28 @@ class StateBootstrap:
             logger.debug(f"加载剧情弧光失败（可能不存在）: {novel_id}, {e}")
             return None
 
+    def _load_knowledge(self, novel_id: str) -> Optional[Dict[str, Any]]:
+        """加载叙事知识到共享内存"""
+        try:
+            from infrastructure.persistence.database.connection import get_database
+
+            db = get_database()
+            row = db.fetch_one(
+                "SELECT * FROM knowledge WHERE novel_id = ?",
+                (novel_id,),
+            )
+
+            if row:
+                knowledge = dict(row)
+                self._shared.set_knowledge(novel_id, knowledge)
+                return knowledge
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"加载叙事知识失败（可能不存在）: {novel_id}, {e}")
+            return None
+
     def _load_bible(self, novel_id: str) -> Optional[Dict[str, Any]]:
         """加载 Bible 到共享内存"""
         try:
