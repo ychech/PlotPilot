@@ -5,6 +5,7 @@ description: 对章节最后2-3段进行AI味专项净化，确保结尾不留�
 builtin: true
 tags:
 - Anti-AI
+-
 - 尾段增强
 - Layer7
 output_format: text
