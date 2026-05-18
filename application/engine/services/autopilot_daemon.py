@@ -88,6 +88,10 @@ class AutopilotDaemon:
         self.foreshadowing_repository = foreshadowing_repository
         self.knowledge_service = knowledge_service
 
+        # 章节"节拍耗尽但字数不足"重写计数器，key=(novel_id, chapter_num)
+        # 防止清除重写陷入新的无限循环
+        self._beat_exhausted_rewrite_count: Dict[tuple, int] = {}
+
         # 惰性初始化 VolumeSummaryService
         if not self.volume_summary_service and llm_service and story_node_repo:
             from application.blueprint.services.volume_summary_service import VolumeSummaryService
@@ -960,22 +964,36 @@ class AutopilotDaemon:
         补写内容追加到原正文末尾。
         """
         supplement_words = max(400, target_word_count // 5)
-        prompt_text = (
-            f"【信息密度补写指令】\n"
-            f"本章大纲：{outline}\n\n"
-            f"本章已生成正文（末尾约400字供参考）：\n"
-            f"…{existing_content[-400:]}\n\n"
-            f"请接续已有正文，补写一段约 {supplement_words} 字的情节推进段落。\n"
-            f"要求：\n"
-            f"1. 至少包含一个角色做出具体决定或行动并产生后果\n"
-            f"2. 或引入一条新信息/线索/冲突\n"
-            f"3. 与前文情绪和场景无缝衔接，不重复已有内容\n"
-            f"4. 不要写章节标题，直接输出正文\n"
-        )
         try:
             from domain.ai.value_objects.prompt import Prompt
             from domain.ai.services.llm_service import GenerationConfig
-            p = Prompt(system="你是专业网文作家，擅长写有信息量的情节推进段落。", user=prompt_text)
+            from infrastructure.ai.prompt_keys import AUTOPILOT_INFO_DENSITY_SUPPLEMENT
+            from infrastructure.ai.prompt_registry import get_prompt_registry
+
+            variables = {
+                "existing_content": existing_content[-400:],
+                "supplement_words": str(supplement_words),
+                "chapter_num": str(chapter_num),
+                "novel_id": novel_id,
+            }
+            registry = get_prompt_registry()
+            p = registry.render_to_prompt(AUTOPILOT_INFO_DENSITY_SUPPLEMENT, variables)
+            if not p:
+                from infrastructure.ai.prompt_utils import get_prompt_system
+                system = get_prompt_system(AUTOPILOT_INFO_DENSITY_SUPPLEMENT)
+                user_msg = (
+                    f"【信息密度补写指令】\n"
+                    f"本章大纲：{outline}\n\n"
+                    f"本章已生成正文（末尾约400字供参考）：\n"
+                    f"…{existing_content[-400:]}\n\n"
+                    f"请接续已有正文，补写一段约 {supplement_words} 字的情节推进段落。\n"
+                    f"要求：\n"
+                    f"1. 至少包含一个角色做出具体决定或行动并产生后果\n"
+                    f"2. 或引入一条新信息/线索/冲突\n"
+                    f"3. 与前文情绪和场景无缝衔接，不重复已有内容\n"
+                    f"4. 不要写章节标题，直接输出正文\n"
+                )
+                p = Prompt(system=system, user=user_msg)
             cfg = GenerationConfig(max_tokens=int(supplement_words * 1.5), temperature=0.82)
             result = await self.llm_service.generate(p, cfg)
             supplement = (result.content if hasattr(result, "content") else str(result)).strip()
@@ -1554,6 +1572,7 @@ class AutopilotDaemon:
 
         # 6. 节拍级生成 + 断点续写 + 完整性保证
         start_beat = novel.current_beat_index or 0
+        entry_start_beat = start_beat  # 记录本轮入口节拍索引，用于死锁检测
         beats_completed = getattr(novel, 'beats_completed', False)
         chapter_content = await self._get_existing_chapter_content(novel, chapter_num) or ""
         use_wf = self.chapter_workflow is not None and bundle is not None
@@ -1666,11 +1685,19 @@ class AutopilotDaemon:
                 novel.current_beat_index = 0
                 novel.beats_completed = False
 
-        if existing_content and start_beat > 0:
-            logger.info(
-                f"[{novel.novel_id}] 断点续写：已有 {len(existing_content)} 字，"
-                f"从第 {start_beat + 1}/{len(beats)} 个节拍继续"
-            )
+        # 日志：start_beat 为 0-based；当 start_beat == len(beats) 时表示节拍已耗尽、仅收章复核，
+        # 不得再打印「从第 len+1 拍继续」，否则会出现「从第 2/1 拍继续」类矛盾日志。
+        if existing_content and len(beats) > 0:
+            if 0 < start_beat < len(beats):
+                logger.info(
+                    f"[{novel.novel_id}] 断点续写：已有 {len(existing_content)} 字，"
+                    f"从第 {start_beat + 1}/{len(beats)} 个节拍继续"
+                )
+            elif start_beat >= len(beats):
+                logger.info(
+                    f"[{novel.novel_id}] 断点续写：已有 {len(existing_content)} 字，"
+                    f"节拍已全部处理（{len(beats)}/{len(beats)}），进入收章复核（本轮不再撰写新节拍）"
+                )
 
         # 批量写入计数器
         write_counter = 0
@@ -2045,6 +2072,13 @@ class AutopilotDaemon:
         # 全节拍已跑完且句末完整时的绝对下限（避免极短篇误卡死，但仍高于旧 60%）
         exception_floor = int(target_word_count * 0.62)
 
+        # 死锁检测：本轮入口时节拍索引已 >= 节拍总数，for 循环一个节拍都没跑，
+        # 意味着系统无法产出任何新内容，若不强制放行将永远循环
+        all_beats_exhausted_no_progress = (
+            total_beats_count > 0
+            and entry_start_beat >= total_beats_count
+        )
+
         # 字数低于主阈值：默认不结章，续写；仅「全节拍有产出 + 句末完整 + ≥exception_floor」例外放行
         if actual_word_count < min_word_threshold:
             if (
@@ -2061,6 +2095,40 @@ class AutopilotDaemon:
                 completion_reason = (
                     f"节拍完成+内容完整 (字数 {int(actual_word_count / target_word_count * 100)}%)"
                 )
+            elif all_beats_exhausted_no_progress and actual_word_count > 0:
+                # 节拍已全部耗尽，本轮无法产出新内容。
+                # 优先策略：清除现有 draft 内容，重置节拍索引，下一轮从第 0 拍重新生成。
+                # 重试超过 2 次后退化为强制放行，避免无限循环。
+                rewrite_key = (novel.novel_id.value, chapter_num)
+                rewrite_count = self._beat_exhausted_rewrite_count.get(rewrite_key, 0)
+                MAX_REWRITE = 2
+                if rewrite_count < MAX_REWRITE:
+                    self._beat_exhausted_rewrite_count[rewrite_key] = rewrite_count + 1
+                    logger.warning(
+                        f"[{novel.novel_id}] ⚠️ 第 {chapter_num} 章节拍已遍历完但字数不足 "
+                        f"({actual_word_count}/{target_word_count})，"
+                        f"清除 draft 内容并从第 0 拍重写（第 {rewrite_count + 1}/{MAX_REWRITE} 次）"
+                    )
+                    # 清除章节内容，让下一轮从零开始生成
+                    self._save_chapter_ephemeral(
+                        novel.novel_id.value, chapter_num,
+                        content="", status="draft", word_count=0
+                    )
+                    novel.current_beat_index = 0
+                    novel.beats_completed = False
+                    self._flush_novel(novel)
+                    return
+                else:
+                    # 已重写 MAX_REWRITE 次仍不足，强制放行避免无限循环
+                    self._beat_exhausted_rewrite_count.pop(rewrite_key, None)
+                    logger.warning(
+                        f"[{novel.novel_id}] ⚠️ 第 {chapter_num} 章已重写 {MAX_REWRITE} 次仍字数不足 "
+                        f"({actual_word_count}/{target_word_count})，强制放行以打破死循环"
+                    )
+                    should_complete = True
+                    completion_reason = (
+                        f"重写{MAX_REWRITE}次后强制放行 ({int(actual_word_count / target_word_count * 100)}%)"
+                    )
             else:
                 logger.warning(
                     f"[{novel.novel_id}] ⚠️ 第 {chapter_num} 章字数不足：{actual_word_count} 字 "
@@ -2139,6 +2207,8 @@ class AutopilotDaemon:
         novel.current_beat_index = 0
         novel.beats_completed = False  # 重置节拍完成标志
         novel.current_stage = NovelStage.AUDITING
+        # 章节正常完成，清理对应的重写计数
+        self._beat_exhausted_rewrite_count.pop((novel.novel_id.value, chapter_num), None)
 
         # 🔗 衔接引擎：章节完成后自检衔接度（非第 1 章）
         # 如果衔接度 < 0.6，自动修整首段（最多 2 轮）
@@ -2906,20 +2976,28 @@ class AutopilotDaemon:
         anchor_block = voice_anchors.strip() or "无额外角色声线锚点。"
         outline = (getattr(chapter, "outline", "") or "").strip() or "无单独大纲，必须严格保留现有剧情事实。"
 
-        system = f"""你是小说文风修订编辑。在不改变故事事实的前提下修正文风偏移；勿重写剧情主链。
+        # CPMS render
+        from infrastructure.ai.prompt_keys import VOICE_REWRITE
+        from infrastructure.ai.prompt_registry import get_prompt_registry
 
-必须遵守：
-1. 保留所有剧情事件、因果顺序、角色关系、伏笔信息、地点与关键信息。
-2. 保留章节的主要段落结构、对话功能与情绪走向，不要扩写新支线。
-3. 只调整叙述口吻、句式节奏、措辞密度、描写轻重，使文本更贴近既有作者文风。
-4. 输出只能是修订后的完整章节正文，不要解释，不要加标题，不要加批注。
+        variables = {
+            "style_fingerprint": style_block,
+            "anchor_block": anchor_block,
+            "chapter_number": str(chapter.number),
+            "attempt": str(attempt),
+            "similarity_score": f"{similarity_score:.4f}",
+            "threshold": f"{VOICE_REWRITE_THRESHOLD:.2f}",
+            "outline": outline,
+            "content": content,
+        }
+        registry = get_prompt_registry()
+        p = registry.render_to_prompt(VOICE_REWRITE, variables)
+        if p:
+            return p
 
-风格约束：
-{style_block}
-
-角色声线锚点：
-{anchor_block}
-"""
+        # Fallback
+        from infrastructure.ai.prompt_utils import get_prompt_system
+        system = get_prompt_system(VOICE_REWRITE)
         user = f"""当前为第 {chapter.number} 章，第 {attempt} 次文风定向修正。
 
 当前相似度：{similarity_score:.4f}
