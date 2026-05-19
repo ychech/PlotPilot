@@ -185,7 +185,7 @@ import { useMessage } from 'naive-ui'
 import { bibleApi } from '../../api/bible'
 import type { CharacterDTO, LocationDTO, TimelineNoteDTO, StyleNoteDTO } from '../../api/bible'
 import { knowledgeApi } from '../../api/knowledge'
-import { MARKET_STYLE_PRESETS, matchPresetValue } from '@/constants/marketStylePresets'
+import { MARKET_STYLE_PRESETS, inferPresetValueFromBookLock, matchPresetValue } from '@/constants/marketStylePresets'
 import { novelApi } from '@/api/novel'
 import { parseGenreWorldFromPremise } from '@/utils/premisePresets'
 
@@ -237,11 +237,21 @@ const hasBookLock = computed(() => {
 
 const hasStyleNotesDetail = computed(() => (state.value.style_notes || '').trim().length > 0)
 
-/** 文风市场预设：匹配内置模板则显示预设名，否则警告文案（单组件避免 v-if 整节点销毁重建） */
+/** 文风市场预设：优先匹配已保存文风；若尚未生成，则按赛道/世界观做只读推断展示。 */
 const stylePresetTag = computed(() => {
   const t = (state.value.style_notes || '').trim()
   if (!t) {
-    return { matched: false, hasText: false, label: '—', tagType: 'default' as const }
+    const inferred = inferPresetValueFromBookLock(lockedGenre.value, lockedWorld.value)
+    if (inferred) {
+      const p = MARKET_STYLE_PRESETS.find((x) => x.value === inferred)
+      return {
+        matched: false,
+        hasText: false,
+        label: p ? `${p.label}（按赛道推断）` : '按赛道推断',
+        tagType: 'default' as const,
+      }
+    }
+    return { matched: false, hasText: false, label: '未生成', tagType: 'default' as const }
   }
   const m = matchPresetValue(t)
   if (m) {
@@ -331,23 +341,11 @@ const toApiFormat = (data: any) => {
   return { characters, world_settings: [], locations, timeline_notes: [], style_notes }
 }
 
-function styleNotesWithCreationDefault(styleNotes: string): string {
-  const t = (styleNotes || '').trim()
-  if (t) return styleNotes
-  const v = MARKET_STYLE_PRESETS[0]?.value ?? 'xianxia_hot'
-  const p = MARKET_STYLE_PRESETS.find((x) => x.value === v)
-  return p?.body ?? ''
-}
-
 /** 并行阶段内解析 Bible；404 时自动 create 后再拉一次 */
 async function fetchBibleStateForPanel(slug: string): Promise<ReturnType<typeof emptyState>> {
   try {
     const bible = await bibleApi.getBible(slug)
-    let ui = fromApiFormat(bible)
-    if (!matchPresetValue(ui.style_notes) && !(ui.style_notes || '').trim()) {
-      ui = { ...ui, style_notes: styleNotesWithCreationDefault('') }
-    }
-    return ui
+    return fromApiFormat(bible)
   } catch (err: any) {
     if (err?.response?.status !== 404) throw err
     try {
@@ -357,11 +355,7 @@ async function fetchBibleStateForPanel(slug: string): Promise<ReturnType<typeof 
       return emptyState()
     }
     const bible = await bibleApi.getBible(slug)
-    let ui = fromApiFormat(bible)
-    if (!matchPresetValue(ui.style_notes) && !(ui.style_notes || '').trim()) {
-      ui = { ...ui, style_notes: styleNotesWithCreationDefault('') }
-    }
-    return ui
+    return fromApiFormat(bible)
   }
 }
 

@@ -970,6 +970,21 @@ const step4RestoredFromCache = ref(false)
 
 const chapterEndForStoryline = computed(() => Math.max(1, props.targetChapters ?? 100))
 
+type BibleUpdatePayload = Parameters<typeof bibleApi.updateBible>[1]
+
+async function updateBiblePreservingCurrent(patch: Partial<BibleUpdatePayload>) {
+  const bible = await bibleApi.getBible(props.novelId)
+  const payload: BibleUpdatePayload = {
+    characters: patch.characters ?? bible.characters ?? [],
+    world_settings: patch.world_settings ?? bible.world_settings ?? [],
+    locations: patch.locations ?? bible.locations ?? [],
+    timeline_notes: patch.timeline_notes ?? bible.timeline_notes ?? [],
+    style_notes: patch.style_notes ?? bible.style_notes ?? [],
+  }
+  await bibleApi.updateBible(props.novelId, payload)
+  bibleData.value = { ...bible, ...payload }
+}
+
 function persistStepFourUiToCache(opts?: { includePlotOptions?: boolean }) {
   if (currentStep.value !== 4) return
   const patch: Partial<Omit<WizardUiCachePayload, 'v' | 'novelId'>> = {
@@ -1804,11 +1819,7 @@ async function saveWorldbuildingEdits(): Promise<boolean> {
 
     // 保存文风公约
     if (styleText.value) {
-      await bibleApi.updateBible(props.novelId, {
-        characters: [],
-        world_settings: [],
-        locations: [],
-        timeline_notes: [],
+      await updateBiblePreservingCurrent({
         style_notes: [{
           id: `${props.novelId}-style-1`,
           category: '文风公约',
@@ -1826,7 +1837,7 @@ async function saveWorldbuildingEdits(): Promise<boolean> {
 /** 保存步骤2的编辑（人物）到后端 */
 async function saveCharactersEdits(): Promise<boolean> {
   try {
-    await bibleApi.updateBible(props.novelId, {
+    await updateBiblePreservingCurrent({
       characters: editableCharacters.value.map((c, idx) => ({
         id: c.id || `${props.novelId}-char-${idx + 1}`,
         name: c.name,
@@ -1844,10 +1855,6 @@ async function saveCharactersEdits(): Promise<boolean> {
         voice_profile: c.voice_profile,
         active_wounds: c.active_wounds,
       })),
-      world_settings: [],
-      locations: [],
-      timeline_notes: [],
-      style_notes: [],
     })
     return true
   } catch (e) {
@@ -1888,17 +1895,13 @@ async function runBulkCharacterExtract() {
 /** 保存步骤3的编辑（地点）到后端 */
 async function saveLocationsEdits(): Promise<boolean> {
   try {
-    await bibleApi.updateBible(props.novelId, {
-      characters: [],
-      world_settings: [],
+    await updateBiblePreservingCurrent({
       locations: editableLocations.value.map(l => ({
         id: l.id || '',
         name: l.name,
         description: l.description,
         location_type: l.location_type || '场景',
       })),
-      timeline_notes: [],
-      style_notes: [],
     })
     return true
   } catch (e) {

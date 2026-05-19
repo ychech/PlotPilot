@@ -49,3 +49,21 @@ export function matchPresetValue(styleNotes: string): string | null {
   }
   return null
 }
+
+function normalizePresetHintText(text: string): string {
+  return (text || '').trim().toLowerCase()
+}
+
+export function inferPresetValueFromBookLock(genre: string, worldPreset: string): string | null {
+  const hint = normalizePresetHintText(`${genre} ${worldPreset}`)
+  if (!hint) return null
+
+  if (/(仙侠|修仙|修真|仙道|问道)/.test(hint)) return 'xianxia_hot'
+  if (/(都市|现实|职场|商战|校园|高武|异能|生活)/.test(hint)) return 'urban_power'
+  if (/(赛博|cyber|朋克|义体|巨企)/.test(hint)) return 'cyberpunk'
+  if (/(悬疑|推理|探案|刑侦|惊悚|灵异|诡秘)/.test(hint)) return 'mystery'
+  if (/(玄幻|史诗|异界|魔法|奇幻)/.test(hint)) return 'xuanhuan_epic'
+  if (/(言情|恋爱|甜宠|都市言情|古言|现言)/.test(hint)) return 'romance_sweet'
+
+  return null
+}

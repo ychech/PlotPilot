@@ -9,6 +9,7 @@ from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
 from application.world.services.bible_service import BibleService
 from application.world.services.worldbuilding_service import WorldbuildingService
+from domain.bible.entities.world_setting import WorldSetting
 from application.world.worldbuilding_merge import (
     bible_dto_world_settings_to_slices,
     merge_worldbuilding_table_and_bible_slices,
@@ -148,16 +149,24 @@ _FALLBACK_BIBLE_WORLDBUILDING_SYSTEM = """你是资深网文策划编辑。根�
 
 _FALLBACK_BIBLE_CHARACTERS_SYSTEM = """你是资深网文策划编辑。基于已有世界观生成主要人物。
 
+**重要：必须输出 role、description、relationships 三个字段。**
 **重要：description 字段必须是单行文本。**
 
 要求：
-1. 至少 3-5 个主要人物（主角、配角、对手、导师等）
+1. 至少 3-5 个主要人物（如主角、女主、男主、女配、男配、反派、对手、导师、盟友等）
 2. 人物要符合世界观设定
 3. 确保人物之间有冲突和互动
 4. 每个人物：姓名、定位、性格特点、目标动机
 5. 明确定义人物之间的关系（敌对、合作、师徒、亲属、暧昧等）
+6. 不要输出 root、bone、web 之类的替代字段；这些信息必须折叠进 description 或 relationships
 
-中文姓名（硬性）：
+命名风格（硬性）：
+- 姓名风格必须与世界观一致，不能违和。
+- 中式玄幻/仙侠/古风/东方异世界/华语都市：使用中文姓名。
+- 西方奇幻/剑与魔法/蒸汽魔法/中世纪王国/教廷与骑士体系：姓名应保留西方语感，但最终输出必须是中文可读的译名/音译名，禁止直接输出纯英文名，也不要整批东方姓名。
+- 科幻按文明母体决定：偏西方则用西式名，偏东亚再用中文名。
+
+中文姓名规则（仅在中式/华语世界启用）：
 - 禁用俗套大姓：李、王、张、刘、陈、杨、林、赵、周、吴（不得作为任何主要角色姓氏）。
 - 主要角色姓氏彼此不同；勿全员同一姓。
 - 像抽卡一样从下列姓氏池均匀随机选用（勿总选前几项）；可混用单姓与复姓。
@@ -168,8 +177,15 @@ _FALLBACK_BIBLE_CHARACTERS_SYSTEM = """你是资深网文策划编辑。基于�
 """
 
 _BIBLE_CHARACTERS_NAMING_USER_SUFFIX = (
-    "\n\n【命名】若使用中文人名：禁止使用姓氏李、王、张、刘、陈、杨、林、赵、周、吴；"
-    "每位主要角色姓氏彼此不同；须从系统提示的姓氏卡池中像「抽卡」一样均匀随机选用，勿总用列表前几项。"
+    "\n\n【命名】姓名风格必须服从世界观："
+    "若是西方奇幻/剑与魔法/骑士教廷体系，请使用中文可读的西幻译名/音译名，禁止直接输出英文原名，也不要整批东方姓名；"
+    "若是中式/华语世界，再使用中文姓名。"
+)
+
+_BIBLE_CHARACTERS_CHINESE_NAME_SUFFIX = (
+    "\n\n【中文姓名补充规则】"
+    "仅当世界观是中式/华语语境时，才使用中文姓氏抽卡规则；"
+    "若世界观偏西幻，请忽略所有中文单姓/复姓卡池，不要混用中文姓氏结构。"
 )
 
 _FALLBACK_BIBLE_LOCATIONS_SYSTEM = """你是资深网文策划编辑。基于已有世界观和人物生成完整地图。
@@ -181,6 +197,173 @@ _FALLBACK_BIBLE_LOCATIONS_SYSTEM = """你是资深网文策划编辑。基于已
 4. 包含不同类型：城市、建筑、区域、特殊场所等
 5. 空间层级用 parent_id 表达
 """
+
+
+def _collapse_text(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _infer_role_from_character_payload(char_data: Dict[str, Any]) -> str:
+    role = _collapse_text(char_data.get("role"))
+    if role:
+        return role
+
+    blob = " ".join(
+        _collapse_text(char_data.get(key))
+        for key in ("web", "description", "root")
+    )
+    if "女主" in blob:
+        return "女主"
+    if "男主" in blob:
+        return "男主"
+    if "女配" in blob:
+        return "女配"
+    if "男配" in blob:
+        return "男配"
+    if any(k in blob for k in ("主角", "主人公")):
+        return "主角"
+    if any(k in blob for k in ("宿敌", "死敌")):
+        return "宿敌"
+    if "反派" in blob:
+        return "反派"
+    if "对手" in blob:
+        return "对手"
+    if any(k in blob for k in ("导师", "师父", "引导", "恩师")):
+        return "导师"
+    if any(k in blob for k in ("盟友", "伙伴", "挚友", "同伴")):
+        return "盟友"
+    return "配角"
+
+
+def _build_description_from_character_payload(char_data: Dict[str, Any]) -> str:
+    direct = _collapse_text(char_data.get("description"))
+    if direct:
+        return direct
+
+    root = _collapse_text(char_data.get("root"))
+    web = _collapse_text(char_data.get("web"))
+    bone = char_data.get("bone") if isinstance(char_data.get("bone"), dict) else {}
+    ghost = _collapse_text(bone.get("ghost"))
+    desire = _collapse_text(bone.get("desire"))
+
+    parts = []
+    if root:
+        parts.append(root)
+    if ghost:
+        parts.append(f"隐秘恐惧：{ghost}")
+    if desire:
+        parts.append(f"核心欲望：{desire}")
+    if web:
+        parts.append(f"关键关系：{web}")
+    return "；".join(p for p in parts if p)
+
+
+_CHARACTER_NAME_CANDIDATE_RE = re.compile(r"^[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z·・'’\-]{1,20}$")
+
+
+def _infer_character_name_from_payload(char_data: Dict[str, Any]) -> str:
+    name = _collapse_text(char_data.get("name"))
+    if name:
+        return name
+
+    for key in ("description", "root", "web"):
+        blob = _collapse_text(char_data.get(key))
+        if not blob:
+            continue
+        first = re.split(r"[，,。；;：:\n]", blob, maxsplit=1)[0].strip()
+        if first and _CHARACTER_NAME_CANDIDATE_RE.match(first):
+            return first
+    return ""
+
+
+def _normalize_character_payload(char_data: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(char_data or {})
+    raw_description = _collapse_text(normalized.get("description"))
+    normalized["role"] = _infer_role_from_character_payload(normalized)
+    normalized["description"] = _build_description_from_character_payload(normalized)
+    if raw_description and not _collapse_text(normalized.get("description")):
+        normalized["description"] = raw_description
+
+    inferred_name = _infer_character_name_from_payload(normalized)
+    if inferred_name and not _collapse_text(normalized.get("name")):
+        normalized["name"] = inferred_name
+        if raw_description.startswith(inferred_name):
+            trimmed = raw_description[len(inferred_name):].lstrip(" ，,。；;：:\n")
+            if trimmed:
+                normalized["description"] = trimmed
+
+    relationships = normalized.get("relationships")
+    if not relationships and _collapse_text(normalized.get("web")):
+        normalized["relationships"] = [
+            {
+                "target": "",
+                "relation": "关键关系",
+                "description": _collapse_text(normalized.get("web")),
+            }
+        ]
+    elif relationships is None:
+        normalized["relationships"] = []
+    return normalized
+
+
+def _infer_character_name_style(premise: str, worldbuilding_summary: str) -> str:
+    blob = _collapse_text(f"{premise} {worldbuilding_summary}")
+    if not blob:
+        return "neutral"
+
+    western_hits = (
+        "西幻", "剑与魔法", "奇幻", "骑士", "公爵", "侯爵", "伯爵", "子爵", "男爵",
+        "教廷", "圣殿", "王国", "帝国", "选帝侯", "魔法学院", "法师塔", "巨龙", "龙族",
+        "精灵", "矮人", "亡灵", "巫师", "牧师",
+    )
+    eastern_hits = (
+        "仙侠", "修仙", "修真", "宗门", "掌门", "长老", "仙门", "灵根", "渡劫",
+        "朝堂", "江湖", "武侠", "世家", "侯府", "将军府", "王爷", "郡主",
+        "都市", "校园", "职场", "总裁", "娱乐圈",
+    )
+
+    west_score = sum(1 for k in western_hits if k in blob)
+    east_score = sum(1 for k in eastern_hits if k in blob)
+    if west_score >= max(2, east_score + 1):
+        return "western_fantasy_zh"
+    if east_score > west_score:
+        return "chinese"
+    return "neutral"
+
+
+def _build_character_name_style_instruction(name_style: str) -> str:
+    if name_style == "western_fantasy_zh":
+        return (
+            "\n\n【命名风格锁定：西幻中文译名】\n"
+            "- 本作世界观偏西方奇幻 / 剑与魔法，姓名必须采用中文可读的西幻译名或音译名。\n"
+            "- 忽略任何中文姓氏抽卡规则，不要从中文单姓/复姓池中选姓。\n"
+            "- 禁止使用欧阳、司徒、南宫、诸葛、闻人、端木等中文复姓；禁止使用顾、苏、沈、萧等中文姓氏结构。\n"
+            "- 禁止出现“中文复姓 + · + 音译名”的混搭格式，例如“南宫·薇奥莱特”“司徒·塞拉芬”。\n"
+            "- 允许的风格示例：阿尔萨斯、伊琳娜、塞拉芬、维奥拉、卡洛斯、雷恩、奥菲莉娅、莱昂、艾德温、伊莎贝拉。\n"
+            "- 不要输出纯英文原名。\n"
+        )
+    if name_style == "chinese":
+        return (
+            "\n\n【命名风格锁定：中文姓名】\n"
+            "- 本作世界观偏中式/华语语境，姓名应使用中文姓名，不使用纯英文名。\n"
+        )
+    return (
+        "\n\n【命名】请根据世界观自行选择最贴合的命名风格；若偏西幻，输出中文可读的西幻译名，若偏中式，输出中文姓名。\n"
+    )
+
+
+def _build_character_prompt_suffix(name_style: str) -> str:
+    base = _BIBLE_CHARACTERS_NAMING_USER_SUFFIX
+    if name_style == "chinese":
+        return base + _BIBLE_CHARACTERS_CHINESE_NAME_SUFFIX
+    if name_style == "western_fantasy_zh":
+        return (
+            "\n\n【命名补充】西幻世界只允许中文可读的西式译名/音译名；"
+            "不要套用中文姓氏抽卡池，不要使用中文复姓，也不要使用“中文姓 + · + 西式名”的混搭。"
+        )
+    return base
 
 
 def parse_json_from_response(rsp: str):
@@ -378,9 +561,9 @@ def _infer_character_importance(char_data: Dict[str, Any]) -> str:
     role = str(char_data.get("role") or "").strip()
     desc_head = str(char_data.get("description") or "")[:160]
     blob = f"{role}{desc_head}"
-    if "主角" in blob:
+    if any(k in blob for k in ("主角", "男主", "女主")):
         return "primary"
-    if any(k in blob for k in ("导师", "师父", "宿敌", "反派", "对手", "核心", "幕后")):
+    if any(k in blob for k in ("导师", "师父", "宿敌", "反派", "对手", "女配", "男配", "核心", "幕后")):
         return "secondary"
     return "minor"
 
@@ -552,7 +735,6 @@ class AutoBibleGenerator:
                 await self._save_worldbuilding(novel_id, bible_data["worldbuilding"])
 
         elif stage == "worldbuilding":
-            logger.debug("Stage worldbuilding - checking Bible record")
             # 确保Bible记录存在
             try:
                 self.bible_service.get_bible_by_novel(novel_id)
@@ -561,11 +743,8 @@ class AutoBibleGenerator:
                 self.bible_service.create_bible(bible_id, novel_id)
                 logger.info(f"Created Bible record: {bible_id}")
 
-            logger.debug("Calling _generate_worldbuilding_and_style")
             # 只生成世界观和文风
             bible_data = await self._generate_worldbuilding_and_style(premise, target_chapters)
-            logger.debug("_generate_worldbuilding_and_style completed, keys=%s", list(bible_data.keys()))
-            logger.debug("Has 'worldbuilding' key: %s, worldbuilding_service is None: %s", 'worldbuilding' in bible_data, self.worldbuilding_service is None)
             # 保存文风
             if "style" in bible_data:
                 style_id = f"{novel_id}-style-1"
@@ -889,12 +1068,9 @@ JSON 格式（不要有其他文字）：
 
     async def _save_worldbuilding(self, novel_id: str, worldbuilding_data: Dict[str, Any]) -> None:
         """保存世界观到数据库（同时保存到Worldbuilding表和Bible的world_settings）"""
-        logger.debug("_save_worldbuilding called")
-
         # 1. 保存到Worldbuilding表（用于后续生成人物和地点时读取）
         if self.worldbuilding_service:
             try:
-                logger.debug("Calling worldbuilding_service.update_worldbuilding")
                 self.worldbuilding_service.update_worldbuilding(
                     novel_id=novel_id,
                     core_rules=worldbuilding_data.get("core_rules"),
@@ -903,33 +1079,51 @@ JSON 格式（不要有其他文字）：
                     culture=worldbuilding_data.get("culture"),
                     daily_life=worldbuilding_data.get("daily_life")
                 )
-                logger.debug("Worldbuilding saved to Worldbuilding table")
                 logger.info(f"Worldbuilding saved for {novel_id}")
             except Exception as e:
                 logger.error("Failed to save worldbuilding: %s", e)
 
         # 2. 同时保存到Bible的world_settings（用于前端显示）
         try:
-            logger.debug("Saving worldbuilding to Bible.world_settings")
-            bible = self.bible_service.get_bible_by_novel(novel_id)
-            if not bible:
+            bible_dto = self.bible_service.get_bible_by_novel(novel_id)
+            if not bible_dto:
                 bible_id = f"{novel_id}-bible"
                 self.bible_service.create_bible(bible_id, novel_id)
+            bible = self.bible_service.bible_repository.get_by_novel_id(NovelId(novel_id))
+            if bible is None:
+                raise EntityNotFoundError("Bible", f"for novel {novel_id}")
 
-            # 将5维度数据转换为world_setting条目
-            # WorldSetting的type只能是'rule', 'location', 'item'，所以统一使用'rule'
             import uuid
-            for dimension_name, dimension_data in worldbuilding_data.items():
-                if isinstance(dimension_data, dict):
-                    for key, value in dimension_data.items():
-                        setting_id = f"{novel_id}-ws-{uuid.uuid4().hex[:8]}"
-                        self.bible_service.add_world_setting(
-                            novel_id=novel_id,
-                            setting_id=setting_id,
-                            name=f"{dimension_name}.{key}",
-                            description=value,
-                            setting_type="rule"  # 统一使用'rule'类型
-                        )
+            existing_names = {
+                getattr(setting, "name", "")
+                for setting in bible.world_settings
+                if getattr(setting, "name", "")
+            }
+            if isinstance(worldbuilding_data, dict):
+                for dimension_name, dimension_data in worldbuilding_data.items():
+                    if isinstance(dimension_data, dict):
+                        for key, value in dimension_data.items():
+                            setting_name = f"{dimension_name}.{key}"
+                            if setting_name in existing_names:
+                                old = next(
+                                    (s for s in bible.world_settings if s.name == setting_name),
+                                    None,
+                                )
+                                if old is not None:
+                                    try:
+                                        bible.remove_world_setting(old.id)
+                                    except Exception:
+                                        pass
+                            setting_id = f"{novel_id}-ws-{uuid.uuid4().hex[:8]}"
+                            bible.add_world_setting(
+                                WorldSetting(
+                                    id=setting_id,
+                                    name=setting_name,
+                                    description=value,
+                                    setting_type="rule",
+                                )
+                            )
+            self.bible_service.bible_repository.save(bible)
             logger.info("Worldbuilding saved to Bible.world_settings successfully")
         except Exception as e:
             logger.error(f"Failed to save to Bible.world_settings: {e}")
@@ -1023,7 +1217,20 @@ JSON 格式：
 }}
 ```"""
 
-        return await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
+        raw = await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
+        if not isinstance(raw, dict):
+            return {"style": "", "worldbuilding": {}}
+
+        style = raw.get("style") or ""
+        worldbuilding = await self._generate_worldbuilding_field_first(
+            premise,
+            target_chapters,
+        )
+
+        return {
+            "style": style.strip() if isinstance(style, str) else str(style),
+            "worldbuilding": worldbuilding,
+        }
 
     # ── 逐维度流式生成（SSE专用） ──────────────────────────────────────
 
@@ -1051,7 +1258,7 @@ JSON 格式：
         result = await self.llm_service.generate(prompt, config)
         return (result.content or "").strip()
 
-    # 维度定义与 worldbuilding 表结构保持一致；这里只列可真正入库的字段。
+    # 维度定义：key → (label, field_definitions)
     _DIMENSION_DEFS = {
         "core_rules": {
             "label": "核心法则",
@@ -1096,8 +1303,43 @@ JSON 格式：
         },
     }
 
+    _FIELD_ORDER: list[tuple[str, str]] = [
+        ("core_rules", "power_system"),
+        ("core_rules", "physics_rules"),
+        ("core_rules", "magic_tech"),
+        ("geography", "terrain"),
+        ("geography", "climate"),
+        ("geography", "resources"),
+        ("geography", "ecology"),
+        ("society", "politics"),
+        ("society", "economy"),
+        ("society", "class_system"),
+        ("culture", "history"),
+        ("culture", "religion"),
+        ("culture", "taboos"),
+        ("daily_life", "food_clothing"),
+        ("daily_life", "language_slang"),
+        ("daily_life", "entertainment"),
+    ]
+
+    def get_worldbuilding_field_plan(self) -> list[dict[str, str]]:
+        """世界观核心字段生成计划。"""
+        plan: list[dict[str, str]] = []
+        for dim_key, field_key in self._FIELD_ORDER:
+            dim_def = self._DIMENSION_DEFS[dim_key]
+            plan.append(
+                {
+                    "dimension": dim_key,
+                    "dimension_label": dim_def["label"],
+                    "field": field_key,
+                    "field_label": self._FIELD_LABELS.get(field_key, field_key),
+                    "field_desc": dim_def["fields"][field_key],
+                }
+            )
+        return plan
+
     def _normalize_dimension_for_storage(self, dim_key: str, dim_data: Any) -> Dict[str, str]:
-        """只保留可入库标准字段；不做语义别名映射。"""
+        """只保留可入库标准字段；扩展字段留给 Bible.world_settings。"""
         dim_def = self._DIMENSION_DEFS.get(dim_key)
         if not dim_def or not isinstance(dim_data, dict):
             return {}
@@ -1134,7 +1376,7 @@ JSON 格式：
         dim_data: Dict[str, str],
         existing_worldbuilding: Dict[str, Any] | None = None,
     ) -> Dict[str, str]:
-        """补齐同一维度中缺失的可入库字段；只按标准字段生成，不洗错 key。"""
+        """补齐当前维度的关键落库字段。"""
         dim_def = self._DIMENSION_DEFS.get(dim_key)
         if not dim_def:
             return dim_data
@@ -1160,6 +1402,73 @@ JSON 格式：
             if generated:
                 completed[field_key] = generated
         return completed
+
+    async def _generate_worldbuilding_field_first(
+        self,
+        premise: str,
+        target_chapters: int,
+    ) -> Dict[str, Dict[str, str]]:
+        """按字段逐个生成世界观核心字段。"""
+        worldbuilding: Dict[str, Dict[str, str]] = {
+            dim_key: {} for dim_key in self._DIMENSION_DEFS.keys()
+        }
+        for item in self.get_worldbuilding_field_plan():
+            dim_key = item["dimension"]
+            field_key = item["field"]
+            value = await self._generate_single_field(
+                premise,
+                target_chapters,
+                dim_key,
+                field_key,
+                worldbuilding,
+                worldbuilding.get(dim_key, {}),
+            )
+            if value:
+                worldbuilding[dim_key][field_key] = value.strip()
+        return worldbuilding
+
+    async def _stream_worldbuilding_fields(
+        self,
+        premise: str,
+        target_chapters: int,
+    ):
+        """按字段流式生成世界观核心字段。"""
+        worldbuilding: Dict[str, Dict[str, str]] = {
+            dim_key: {} for dim_key in self._DIMENSION_DEFS.keys()
+        }
+        for item in self.get_worldbuilding_field_plan():
+            dim_key = item["dimension"]
+            field_key = item["field"]
+            chunks: list[str] = []
+            async for chunk in self._stream_single_field(
+                premise,
+                target_chapters,
+                dim_key,
+                field_key,
+                worldbuilding,
+                worldbuilding.get(dim_key, {}),
+            ):
+                chunks.append(chunk)
+                yield {
+                    "type": "field_chunk",
+                    "dimension": dim_key,
+                    "dimension_label": item["dimension_label"],
+                    "field": field_key,
+                    "field_label": item["field_label"],
+                    "chunk": chunk,
+                }
+
+            value = "".join(chunks).strip()
+            if value:
+                worldbuilding[dim_key][field_key] = value
+                yield {
+                    "type": "field_done",
+                    "dimension": dim_key,
+                    "dimension_label": item["dimension_label"],
+                    "field": field_key,
+                    "field_label": item["field_label"],
+                    "value": value,
+                }
 
     async def _generate_single_dimension(
         self,
@@ -1246,7 +1555,7 @@ JSON 格式：
                 config = GenerationConfig(max_tokens=4096, temperature=0.7)
                 result_raw = await self.llm_service.generate(prompt, config)
                 raw_text = result_raw.content if hasattr(result_raw, "content") else str(result_raw)
-                result = _extract_json_object(raw_text)
+                result = _parse_llm_json_to_dict(_sanitize_llm_json_output(raw_text))
                 if not isinstance(result, dict):
                     raise ValueError("LLM returned non-dict")
             else:
@@ -1256,13 +1565,14 @@ JSON 格式：
                 logger.warning("Dimension %s LLM returned non-dict: %s", dim_key, type(result))
                 return {}
             normalized = self._normalize_dimension_for_storage(dim_key, result)
-            return await self._complete_dimension_storage_fields(
+            completed = await self._complete_dimension_storage_fields(
                 premise,
                 target_chapters,
                 dim_key,
                 normalized,
                 existing_worldbuilding,
             )
+            return completed
         except Exception as e:
             logger.error("Failed to generate dimension %s: %s", dim_key, e)
             return {}
@@ -1483,24 +1793,41 @@ JSON 格式：
         "power_system": "力量体系",
         "physics_rules": "物理规律",
         "magic_tech": "魔法/科技",
+        "cost_and_limitation": "代价与限制",
+        "resource_scarcity": "稀缺资源",
         "terrain": "地形",
         "climate": "气候",
         "resources": "资源",
         "ecology": "生态",
+        "forbidden_zones": "禁区",
+        "urban_core": "核心城市",
+        "hidden_realms": "秘境",
         "politics": "政治体制",
         "economy": "经济模式",
         "class_system": "阶级系统",
+        "power_structure": "权力结构",
+        "oppression_mechanism": "压迫机制",
+        "class_division": "阶层划分",
         "history": "历史事件",
         "religion": "宗教信仰",
         "taboos": "文化禁忌",
+        "worship": "崇拜与祭祀",
+        "oaths_and_curses": "誓言与诅咒",
         "food_clothing": "衣食住行",
         "language_slang": "俚语与口音",
         "entertainment": "娱乐方式",
+        "survival_tactics": "生存策略",
+        "market_reality": "市场状况",
+        "food_and_drink": "饮食文化",
+        "slang_and_profanity": "粗话与黑话",
     }
 
     async def _generate_characters(self, premise: str, target_chapters: int, worldbuilding: Dict[str, Any]) -> Dict[str, Any]:
         """基于世界观生成人物"""
         wb_summary = self._summarize_worldbuilding(worldbuilding)
+        name_style = _infer_character_name_style(premise, wb_summary)
+        name_style_instruction = _build_character_name_style_instruction(name_style)
+        name_style_suffix = _build_character_prompt_suffix(name_style)
 
         from infrastructure.ai.prompt_utils import get_prompt_system
         system_prompt = get_prompt_system(BIBLE_CHARACTERS, fallback=_FALLBACK_BIBLE_CHARACTERS_SYSTEM)
@@ -1510,7 +1837,7 @@ JSON 格式：
 **重要：description 字段必须是单行文本。**
 
 要求：
-1. 至少 3-5 个主要人物（主角、配角、对手、导师等）
+1. 至少 3-5 个主要人物（如主角、女主、男主、女配、男配、反派、对手、导师、盟友等）
 2. 人物要符合世界观设定
 3. 确保人物之间有冲突和互动
 4. 每个人物：姓名、定位、性格特点、目标动机
@@ -1521,7 +1848,7 @@ JSON 格式：
   "characters": [
     {
       "name": "人物名",
-      "role": "主角/配角/对手/导师",
+      "role": "角色定位（如主角/女主/男主/女配/男配/反派/对手/导师/盟友）",
       "description": "性格、背景、目标、特点，所有内容在一行内，用逗号分隔",
       "relationships": [
         {
@@ -1541,12 +1868,19 @@ JSON 格式：
 
 请基于这个世界观生成主要人物。
 
+必须严格输出以下字段：
+- role：角色定位，允许使用更具体的中文定位，如主角、女主、男主、女配、男配、反派、对手、导师、盟友
+- description：单行简介，概括人物身份、性格、目标、矛盾
+- relationships：人物关系列表
+禁止输出 root、bone、web、triangle 等替代字段。
+{name_style_instruction}
+
 请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
 ```json
 {{
   "characters": []
 }}
-```""" + _BIBLE_CHARACTERS_NAMING_USER_SUFFIX
+        ```""" + name_style_suffix
 
         return await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
 
@@ -1567,6 +1901,9 @@ JSON 格式：
             {"type": "done", "count": int}   — 全部完成
         """
         wb_summary = self._summarize_worldbuilding(worldbuilding)
+        name_style = _infer_character_name_style(premise, wb_summary)
+        name_style_instruction = _build_character_name_style_instruction(name_style)
+        name_style_suffix = _build_character_prompt_suffix(name_style)
         from infrastructure.ai.prompt_utils import get_prompt_system
         system_prompt = get_prompt_system(BIBLE_CHARACTERS, fallback=_FALLBACK_BIBLE_CHARACTERS_SYSTEM)
         user_prompt = f"""故事创意：{premise}
@@ -1576,12 +1913,19 @@ JSON 格式：
 
 请基于这个世界观生成主要人物。
 
+必须严格输出以下字段：
+- role：角色定位，允许使用更具体的中文定位，如主角、女主、男主、女配、男配、反派、对手、导师、盟友
+- description：单行简介，概括人物身份、性格、目标、矛盾
+- relationships：人物关系列表
+禁止输出 root、bone、web、triangle 等替代字段。
+{name_style_instruction}
+
 请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
 ```json
 {{
   "characters": []
 }}
-```""" + _BIBLE_CHARACTERS_NAMING_USER_SUFFIX
+        ```""" + name_style_suffix
         prompt = Prompt(system=system_prompt, user=user_prompt)
         config = GenerationConfig(max_tokens=4096, temperature=0.7)
 
@@ -1598,8 +1942,21 @@ JSON 格式：
                     if parsed is None:
                         break
                     char_data, buf = parsed
+                    char_data = _normalize_character_payload(char_data)
                     yield {"type": "character", "index": char_index, "content": char_data}
                     char_index += 1
+
+            # 流正常结束但增量解析未抠出任何角色时，兜底整包解析一次。
+            if char_index == 0 and buf.strip():
+                try:
+                    full = _sanitize_llm_json_output(buf)
+                    result = _parse_llm_json_to_dict(full) if full else {}
+                    for ch in result.get("characters", []):
+                        ch = _normalize_character_payload(ch)
+                        yield {"type": "character", "index": char_index, "content": ch}
+                        char_index += 1
+                except Exception as e:
+                    logger.warning("Character stream final parse failed: %s", e)
 
         except Exception as e:
             logger.error("Stream generate characters failed: %s", e)
@@ -1609,6 +1966,7 @@ JSON 格式：
                     full = _sanitize_llm_json_output(buf)
                     result = _parse_llm_json_to_dict(full) if full else {}
                     for ch in result.get("characters", []):
+                        ch = _normalize_character_payload(ch)
                         yield {"type": "character", "index": char_index, "content": ch}
                         char_index += 1
                 except Exception:
@@ -1723,6 +2081,17 @@ JSON 格式：
                     yield {"type": "location", "index": loc_index, "content": loc_data}
                     loc_index += 1
 
+            # 流正常结束但增量解析未抠出任何地点时，兜底整包解析一次。
+            if loc_index == 0 and buf.strip():
+                try:
+                    full = _sanitize_llm_json_output(buf)
+                    result = _parse_llm_json_to_dict(full) if full else {}
+                    for loc in result.get("locations", []):
+                        yield {"type": "location", "index": loc_index, "content": loc}
+                        loc_index += 1
+                except Exception as e:
+                    logger.warning("Location stream final parse failed: %s", e)
+
         except Exception as e:
             logger.error("Stream generate locations failed: %s", e)
             if buf.strip():
@@ -1762,8 +2131,6 @@ JSON 格式：
             return _parse_llm_json_to_dict(content)
         except json.JSONDecodeError as e:
             logger.warning(f"Direct JSON parse failed, attempting repair: {e}")
-            logger.debug(f"Content length: {len(content)}")
-            logger.debug(f"Raw content (first 1000 chars): {content[:1000]}")
 
             # 第二轮：使用修复引擎（处理截断、中文引号、未闭合括号等）
             try:
@@ -1774,7 +2141,7 @@ JSON 格式：
                 logger.error(f"Failed to parse JSON (even after repair): {e2}")
                 logger.error(f"Raw content (first 1000 chars): {content[:1000]}")
                 logger.error(f"Raw content (last 500 chars): {content[-500:]}")
-                raise  # 向上抛出，让重试逻辑处理
+                return {}
 
     async def _call_llm_and_parse_with_retry(
         self,
