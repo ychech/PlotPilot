@@ -14,7 +14,8 @@ from application.world.dtos.bible_dto import BibleDTO
 from interfaces.api.dependencies import (
     get_bible_service,
     get_auto_bible_generator,
-    get_auto_knowledge_generator
+    get_auto_knowledge_generator,
+    get_novel_service,
 )
 from domain.shared.exceptions import EntityNotFoundError
 from application.world.bible_generation_state import (
@@ -189,7 +190,6 @@ async def generate_bible(
         clear_bible_generation_state(novel_id)
         try:
             # 获取小说信息（需要 premise 和 target_chapters）
-            from interfaces.api.dependencies import get_novel_service
             novel_service = get_novel_service()
             novel = novel_service.get_novel(novel_id)
             if not novel:
@@ -306,7 +306,6 @@ async def _sse_bible_generator(
     knowledge_generator: AutoKnowledgeGenerator,
 ):
     """SSE 生成器：逐步推送 Bible 生成进度和数据片段。"""
-    from interfaces.api.dependencies import get_novel_service
 
     # ── 起始 ──
     yield _sse_fmt("phase", {"phase": "init", "message": "正在准备生成环境..."})
@@ -364,67 +363,60 @@ async def _sse_bible_generator(
             except Exception as e:
                 logger.warning("Style generation failed (non-fatal): %s", e)
 
-            # 2. 逐维度流式生成世界观（每维度一次 LLM 流式请求，边接收 token 边推送）
-            dim_keys = ["core_rules", "geography", "society", "culture", "daily_life"]
-            dim_labels = {
-                "core_rules": "核心法则",
-                "geography": "地理生态",
-                "society": "社会结构",
-                "culture": "历史文化",
-                "daily_life": "沉浸感细节",
-            }
-            accumulated_wb: dict = {}  # 已生成的维度数据，用于上下文传递
+            announced_dims: set[str] = set()
+            async for item in bible_generator._stream_worldbuilding_fields(
+                premise,
+                novel.target_chapters,
+            ):
+                dim_key = item["dimension"]
+                dim_label = item["dimension_label"]
+                field_key = item["field"]
+                field_label = item["field_label"]
 
-            for dim_key in dim_keys:
-                dim_label = dim_labels[dim_key]
+                if dim_key not in announced_dims:
+                    announced_dims.add(dim_key)
+                    yield _sse_fmt("phase", {"phase": f"worldbuilding_{dim_key}", "message": f"正在构建{dim_label}..."})
+                    await asyncio.sleep(0)
 
-                # 通知前端"即将生成该维度"
-                yield _sse_fmt("phase", {"phase": f"worldbuilding_{dim_key}", "message": f"正在构建{dim_label}..."})
-                await asyncio.sleep(0)
+                if item["type"] == "field_chunk":
+                    yield _sse_fmt("data", {
+                        "type": "worldbuilding_field_chunk",
+                        "dimension": dim_key,
+                        "field": field_key,
+                        "chunk": item["chunk"],
+                    })
+                    await asyncio.sleep(0)
+                    continue
 
-                # ── 维度级流式：一次 LLM 调用流式输出整个维度 JSON ──
-                # 逐 token 推送 worldbuilding_dim_chunk（前端可逐字看到内容）
-                # 维度完成后推送每个字段的 worldbuilding_field 事件
+                if item["type"] != "field_done":
+                    continue
+
+                yield _sse_fmt("phase", {
+                    "phase": f"worldbuilding_{dim_key}_{field_key}",
+                    "message": f"正在生成{dim_label} - {field_label}..."
+                })
+                yield _sse_fmt("data", {
+                    "type": "worldbuilding_field_done",
+                    "dimension": dim_key,
+                    "field": field_key,
+                    "value": item["value"],
+                })
+                yield _sse_fmt("data", {
+                    "type": "worldbuilding_field",
+                    "dimension": dim_key,
+                    "field": field_key,
+                    "value": item["value"],
+                })
+
                 try:
-                    parts: list[str] = []
-                    async for chunk in bible_generator._stream_single_dimension(
-                        premise, novel.target_chapters, dim_key, accumulated_wb,
-                    ):
-                        parts.append(chunk)
-                        # 逐 token 推送 SSE（让前端看到逐字生成）
-                        yield _sse_fmt("data", {
-                            "type": "worldbuilding_dim_chunk",
-                            "dimension": dim_key,
-                            "chunk": chunk,
-                        })
-                        await asyncio.sleep(0)
-
-                    full_text = "".join(parts).strip()
-                    dim_data = _parse_dimension_json(full_text, dim_key)
+                    await bible_generator._save_worldbuilding(
+                        novel_id,
+                        {dim_key: {field_key: item["value"]}},
+                    )
                 except Exception as e:
-                    logger.error("Failed to stream dimension %s: %s", dim_key, e)
-                    dim_data = {}
+                    logger.warning("Failed to save field %s.%s via SSE: %s", dim_key, field_key, e)
 
-                if dim_data:
-                    accumulated_wb[dim_key] = dim_data
-                    # 逐字段推送完整的字段值（前端更新最终状态）
-                    for field_key, field_value in dim_data.items():
-                        if field_value:
-                            yield _sse_fmt("data", {
-                                "type": "worldbuilding_field",
-                                "dimension": dim_key,
-                                "field": field_key,
-                                "value": field_value,
-                            })
-                            await asyncio.sleep(0.05)
-
-                    # 即时保存该维度到数据库
-                    try:
-                        await bible_generator._save_worldbuilding(novel_id, {dim_key: dim_data})
-                    except Exception as e:
-                        logger.warning("Failed to save dimension %s via SSE: %s", dim_key, e)
-
-                await asyncio.sleep(0.1)  # 给前端渲染数据的时间
+                await asyncio.sleep(0.02)
 
             yield _sse_fmt("phase", {"phase": "worldbuilding_done", "message": "世界观生成完成！"})
 

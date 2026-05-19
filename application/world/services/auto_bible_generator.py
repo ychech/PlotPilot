@@ -1049,25 +1049,10 @@ JSON 格式：
             return {"style": "", "worldbuilding": {}}
 
         style = raw.get("style") or ""
-        raw_worldbuilding = raw.get("worldbuilding") or {}
-        worldbuilding: Dict[str, Any] = {}
-
-        existing_worldbuilding: Dict[str, Any] = {}
-        for dim_key in self._DIMENSION_DEFS.keys():
-            normalized = self._normalize_dimension_for_storage(
-                dim_key,
-                raw_worldbuilding.get(dim_key),
-            )
-            completed = await self._complete_dimension_storage_fields(
-                premise,
-                target_chapters,
-                dim_key,
-                normalized,
-                existing_worldbuilding,
-            )
-
-            worldbuilding[dim_key] = completed
-            existing_worldbuilding[dim_key] = completed
+        worldbuilding = await self._generate_worldbuilding_field_first(
+            premise,
+            target_chapters,
+        )
 
         return {
             "style": style.strip() if isinstance(style, str) else str(style),
@@ -1145,6 +1130,41 @@ JSON 格式：
         },
     }
 
+    _FIELD_ORDER: list[tuple[str, str]] = [
+        ("core_rules", "power_system"),
+        ("core_rules", "physics_rules"),
+        ("core_rules", "magic_tech"),
+        ("geography", "terrain"),
+        ("geography", "climate"),
+        ("geography", "resources"),
+        ("geography", "ecology"),
+        ("society", "politics"),
+        ("society", "economy"),
+        ("society", "class_system"),
+        ("culture", "history"),
+        ("culture", "religion"),
+        ("culture", "taboos"),
+        ("daily_life", "food_clothing"),
+        ("daily_life", "language_slang"),
+        ("daily_life", "entertainment"),
+    ]
+
+    def get_worldbuilding_field_plan(self) -> list[dict[str, str]]:
+        """世界观核心字段生成计划。"""
+        plan: list[dict[str, str]] = []
+        for dim_key, field_key in self._FIELD_ORDER:
+            dim_def = self._DIMENSION_DEFS[dim_key]
+            plan.append(
+                {
+                    "dimension": dim_key,
+                    "dimension_label": dim_def["label"],
+                    "field": field_key,
+                    "field_label": self._FIELD_LABELS.get(field_key, field_key),
+                    "field_desc": dim_def["fields"][field_key],
+                }
+            )
+        return plan
+
     def _normalize_dimension_for_storage(self, dim_key: str, dim_data: Any) -> Dict[str, str]:
         """只保留可入库标准字段；扩展字段留给 Bible.world_settings。"""
         dim_def = self._DIMENSION_DEFS.get(dim_key)
@@ -1209,6 +1229,73 @@ JSON 格式：
             if generated:
                 completed[field_key] = generated
         return completed
+
+    async def _generate_worldbuilding_field_first(
+        self,
+        premise: str,
+        target_chapters: int,
+    ) -> Dict[str, Dict[str, str]]:
+        """按字段逐个生成世界观核心字段。"""
+        worldbuilding: Dict[str, Dict[str, str]] = {
+            dim_key: {} for dim_key in self._DIMENSION_DEFS.keys()
+        }
+        for item in self.get_worldbuilding_field_plan():
+            dim_key = item["dimension"]
+            field_key = item["field"]
+            value = await self._generate_single_field(
+                premise,
+                target_chapters,
+                dim_key,
+                field_key,
+                worldbuilding,
+                worldbuilding.get(dim_key, {}),
+            )
+            if value:
+                worldbuilding[dim_key][field_key] = value.strip()
+        return worldbuilding
+
+    async def _stream_worldbuilding_fields(
+        self,
+        premise: str,
+        target_chapters: int,
+    ):
+        """按字段流式生成世界观核心字段。"""
+        worldbuilding: Dict[str, Dict[str, str]] = {
+            dim_key: {} for dim_key in self._DIMENSION_DEFS.keys()
+        }
+        for item in self.get_worldbuilding_field_plan():
+            dim_key = item["dimension"]
+            field_key = item["field"]
+            chunks: list[str] = []
+            async for chunk in self._stream_single_field(
+                premise,
+                target_chapters,
+                dim_key,
+                field_key,
+                worldbuilding,
+                worldbuilding.get(dim_key, {}),
+            ):
+                chunks.append(chunk)
+                yield {
+                    "type": "field_chunk",
+                    "dimension": dim_key,
+                    "dimension_label": item["dimension_label"],
+                    "field": field_key,
+                    "field_label": item["field_label"],
+                    "chunk": chunk,
+                }
+
+            value = "".join(chunks).strip()
+            if value:
+                worldbuilding[dim_key][field_key] = value
+                yield {
+                    "type": "field_done",
+                    "dimension": dim_key,
+                    "dimension_label": item["dimension_label"],
+                    "field": field_key,
+                    "field_label": item["field_label"],
+                    "value": value,
+                }
 
     async def _generate_single_dimension(
         self,
