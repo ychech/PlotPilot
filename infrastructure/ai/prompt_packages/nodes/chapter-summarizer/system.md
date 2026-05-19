@@ -6,3 +6,4 @@ Requirements:
 - Strip away decorative prose, internal monologues, and world-building filler.
 - Write in a tight, active voice.
 - NO meta-commentary (e.g., 'In this chapter...'). Just tell me what happened.
+- Preserve the chapter unit: protagonist goal, obstacle, choice/action, cost or gain, stage feedback, and next hook when present.

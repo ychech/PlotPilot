@@ -1,0 +1,25 @@
+name: 节点正文兑现验收协议
+category: review
+source: application/engine/services/expanded_outline_validators.py::BeatRealizationValidator
+description: 检查单个已生成节点正文是否兑现节点卡，失败则触发原位重写
+builtin: true
+tags:
+- 节点兑现
+- 正文验收
+- 原位重写
+output_format: json
+variables:
+- name: node_card
+  desc: 当前节点卡
+  type: string
+  required: true
+- name: content
+  desc: 当前节点正文
+  type: string
+  required: true
+- name: target_words
+  desc: 节点目标字数
+  type: integer
+  required: true
+id: beat-realization-validation
+sort_order: 36

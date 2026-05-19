@@ -96,8 +96,16 @@ class NovelStatusResponse:
     auto_approve_mode: bool
     last_chapter_audit: Optional[Dict[str, Any]]
     audit_progress: Optional[Dict[str, Any]]
-    daemon_alive: bool
-    daemon_heartbeat_at: Optional[float]
+    current_unit_id: str = ""
+    current_node_card_title: str = ""
+    current_node_card_function: str = ""
+    current_node_card_action: str = ""
+    current_node_card_feedback: str = ""
+    current_node_card_info_delta: str = ""
+    last_node_validation: Optional[Dict[str, Any]] = None
+    last_unit_drama_validation: Optional[Dict[str, Any]] = None
+    daemon_alive: bool = False
+    daemon_heartbeat_at: Optional[float] = None
     _from_shared_memory: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
@@ -126,6 +134,14 @@ class NovelStatusResponse:
             "auto_approve_mode": self.auto_approve_mode,
             "last_chapter_audit": self.last_chapter_audit,
             "audit_progress": self.audit_progress,
+            "current_unit_id": self.current_unit_id,
+            "current_node_card_title": self.current_node_card_title,
+            "current_node_card_function": self.current_node_card_function,
+            "current_node_card_action": self.current_node_card_action,
+            "current_node_card_feedback": self.current_node_card_feedback,
+            "current_node_card_info_delta": self.current_node_card_info_delta,
+            "last_node_validation": self.last_node_validation,
+            "last_unit_drama_validation": self.last_unit_drama_validation,
             "daemon_alive": self.daemon_alive,
             "daemon_heartbeat_at": self.daemon_heartbeat_at,
             "_from_shared_memory": self._from_shared_memory,
@@ -234,6 +250,14 @@ class QueryService:
             auto_approve_mode=state.auto_approve_mode,
             last_chapter_audit=None,  # 需要单独存储
             audit_progress=None,
+            current_unit_id="",
+            current_node_card_title="",
+            current_node_card_function="",
+            current_node_card_action="",
+            current_node_card_feedback="",
+            current_node_card_info_delta="",
+            last_node_validation=None,
+            last_unit_drama_validation=None,
             daemon_alive=self._shared.is_daemon_alive(),
             daemon_heartbeat_at=self._shared.get_daemon_heartbeat(),
             _from_shared_memory=True,
@@ -280,6 +304,14 @@ class QueryService:
             auto_approve_mode=raw_data.get("auto_approve_mode", False),
             last_chapter_audit=None,
             audit_progress=raw_data.get("audit_progress"),
+            current_unit_id=raw_data.get("current_unit_id", ""),
+            current_node_card_title=raw_data.get("current_node_card_title", ""),
+            current_node_card_function=raw_data.get("current_node_card_function", ""),
+            current_node_card_action=raw_data.get("current_node_card_action", ""),
+            current_node_card_feedback=raw_data.get("current_node_card_feedback", ""),
+            current_node_card_info_delta=raw_data.get("current_node_card_info_delta", ""),
+            last_node_validation=raw_data.get("last_node_validation"),
+            last_unit_drama_validation=raw_data.get("last_unit_drama_validation"),
             daemon_alive=self._shared.is_daemon_alive(),
             daemon_heartbeat_at=self._shared.get_daemon_heartbeat(),
             _from_shared_memory=True,
@@ -386,6 +418,14 @@ class QueryService:
                 auto_approve_mode=bool(novel_row['auto_approve_mode']),
                 last_chapter_audit=None,
                 audit_progress=None,
+                current_unit_id="",
+                current_node_card_title="",
+                current_node_card_function="",
+                current_node_card_action="",
+                current_node_card_feedback="",
+                current_node_card_info_delta="",
+                last_node_validation=None,
+                last_unit_drama_validation=None,
                 daemon_alive=self._shared.is_daemon_alive(),
                 daemon_heartbeat_at=self._shared.get_daemon_heartbeat(),
                 _from_shared_memory=False,  # 标记数据来自数据库

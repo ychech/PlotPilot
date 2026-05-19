@@ -1,0 +1,22 @@
+name: 情绪爽点节点卡生成协议
+category: planning
+source: application/engine/services/expanded_outline_service.py
+description: 将单元剧拆成正文前可验收的情绪/爽点节点卡，避免空心 beat
+builtin: true
+tags:
+- 节点卡
+- 情绪节点
+- 爽点
+- 信息差
+output_format: json
+variables:
+- name: unit_drama_json
+  desc: 单元剧规划 JSON
+  type: string
+  required: true
+- name: outline
+  desc: 原始章节大纲
+  type: string
+  required: true
+id: expanded-outline-node-card
+sort_order: 34

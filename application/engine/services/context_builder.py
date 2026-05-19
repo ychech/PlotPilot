@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from application.engine.dtos.scene_director_dto import SceneDirectorInput
+from application.engine.dtos.expanded_outline_dto import EmotionBeatCard, UnitDramaPlan
 
 from application.world.services.bible_service import BibleService
 from domain.bible.services.relationship_engine import RelationshipEngine
@@ -27,7 +28,7 @@ from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepo
 from domain.ai.services.vector_store import VectorStore
 from domain.ai.services.embedding_service import EmbeddingService
 from application.engine.services.context_budget_allocator import ContextBudgetAllocator
-from application.engine.dag.plan.schema import ChapterExecutionPlan
+from application.engine.services.expanded_outline_service import ExpandedOutlineService
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ class Beat:
     scene_goal: str = ""  # 场景目标（从规划阶段继承）
     transition_from_prev: str = ""  # 🔗 从上一节拍如何过渡（对话延续/动作接续/情绪过渡/场景切换）
     location_id: str = ""  # 微观坐标（由 ATG visit_sequence 绑定；无 ATG 时为空）
+    unit_id: str = ""  # 单元剧 ID（由 UnitDramaPlanner 绑定；无规划时为空）
+    beat_card: Optional[EmotionBeatCard] = None  # 情绪/爽点节点卡
+    unit_plan: Optional[UnitDramaPlan] = None  # 原始单元剧规划
 
     def __post_init__(self):
         if self.expansion_hints is None:
@@ -146,6 +150,7 @@ class ContextBuilder:
             confluence_point_repository=confluence_point_repository,
             worldbuilding_repository=worldbuilding_repository,
         )
+        self.expanded_outline_service = ExpandedOutlineService()
 
     def estimate_tokens(self, text: str) -> int:
         """估算文本 token 数（委托 ContextBudgetAllocator）。"""
@@ -254,53 +259,56 @@ class ContextBuilder:
     # 扩写维度提示（根据节拍类型动态注入）
     EXPANSION_HINTS = {
         "action": [
-            "加入招式物理碰撞细节：打击感、力量传导、声音",
-            "描写环境破坏：招式对周围的影响、碎片飞溅",
-            "旁观者反应：惊呼、恐惧、议论",
-            "战斗节奏变化：快攻、僵持、反击",
+            "动作必须改变局势：位置、资源、伤势、身份暴露或主动权至少一项变化",
+            "写清动作前的目标、动作中的阻碍、动作后的结果",
+            "旁观者反应必须落成实际变化：让路、收手、改口、交易、欠人情",
+            "战斗或追逐只保留会影响胜负判断的环境细节",
         ],
         "dialogue": [
-            "加入微表情描写：眼神变化、嘴角牵动",
-            "肢体语言：手势、站姿、身体朝向",
-            "潜台词暗示：话中有话、欲言又止",
-            "对话节奏：打断、沉默、抢话",
+            "每轮对白必须推进信息、关系、误判、交易或威胁之一",
+            "对白后要有局势变化，不能只停在情绪表达",
+            "用打断、回避、反问或条件交换制造潜台词",
+            "减少声线标签，用话语内容和动作后果体现态度",
         ],
         "sensory": [
-            "光影变化：明暗对比、光线方向",
-            "声音细节：环境音、脚步声、呼吸声",
-            "温度触感：冷热、干湿、材质纹理",
-            "气味味道：空气中的气息、食物香气",
+            "只保留会帮助主角判断危险或机会的感官细节",
+            "感官信息必须立刻影响下一步行动",
+            "不要连续堆颜色、温度、气味和抽象压迫感",
+            "把环境写成阻碍、遮蔽、线索或资源，而不是背景板",
         ],
         "emotion": [
-            "内心独白：想法、疑问、自我说服",
-            "回忆闪回：与当前情绪相关的往事",
-            "身体反应：心跳、手抖、冷汗",
-            "情绪转变：从一种情绪到另一种的过渡",
+            "情绪必须来自目标受阻、资源不足、误判或代价逼近",
+            "用选择前后的动作变化表现情绪，不写长段自我解释",
+            "回忆只能补当前选择的动机，不能单独扩成长背景",
+            "情绪段结尾必须落到决定、行动、关系变化或新风险",
         ],
         "suspense": [
-            "心理推演：主角的推理过程、疑点",
-            "五官感知变化：异常的细节、违和感",
-            "时间拉长：等待、观察、试探",
-            "悬念钩子：未解之谜、意外转折",
+            "悬念必须绑定人、物、地点、倒计时、代价或未完成动作",
+            "不要用虚神秘词拖延答案，至少给出一个可追踪事实",
+            "悬念推进要逼主角试探、拒绝、交易、逃跑或反击",
+            "章尾钩子必须接出下一目标或新阻碍",
         ],
         "hook": [
-            "开篇冲击：立即抓住读者的事件或画面",
-            "人物特质展示：通过行动而非描述",
-            "冲突暗示：不安、危机、悬念",
-            "世界观速写：通过细节而非说明",
+            "前300字交代人物、地点、事件、主角当前目标",
+            "前500字出现明确阻碍或倒计时",
+            "开篇世界观只保留目标资源、风险和压力源",
+            "用主角正在做的事展示特质，不写设定说明书",
         ],
         "character_intro": [
-            "外貌特征：独特的外表标记",
-            "性格展示：通过言行而非描述",
-            "关系暗示：与其他角色的互动方式",
-            "记忆点：让读者记住的特征",
+            "人物出场必须带目标、利益或阻碍，不能只做外貌介绍",
+            "用一次选择或一句有信息量的对白建立记忆点",
+            "关系暗示要影响当场行动或资源分配",
+            "避免新增无关有名角色",
         ],
     }
 
-    # 节拍数量上限：拍数过多时每拍字数太少，模型倾向用八股堆满
-    MAX_BEATS = 8
-    # 每拍最低字数：低于此值将合并相邻拍（略抬高以减少「碎拍」内心戏凑数）
-    MIN_BEAT_WORDS = 800
+    # 节拍数量上限：短章不宜过碎，长章也不应无限拆分
+    MAX_BEATS = 9
+    LONG_CHAPTER_MAX_BEATS = 24
+    # 节拍最低目标字数：用于合并/兜底，不是强制平均值
+    MIN_BEAT_WORDS = 300
+    SHORT_CHAPTER_MAX_BEATS = 6
+    MID_CHAPTER_MAX_BEATS = 7
 
     def magnify_outline_to_beats(
         self,
@@ -308,88 +316,151 @@ class ContextBuilder:
         outline: str,
         target_chapter_words: int = 2500,
         beat_sheet: Optional[Any] = None,
-        chapter_execution_plan: Optional[ChapterExecutionPlan] = None,
         scene_director: Optional[Any] = None,
+        novel_id: str = "",
     ) -> List[Beat]:
         """节拍放大器：将章节大纲拆分为微观节拍
 
         核心策略（选项 C：动态弹性扩写与前置预估）：
-        1. 优先使用章前执行计划 ``chapter_execution_plan``（planning_outline_partition / CPMS 拆拍）
-        2. 否则使用规划阶段的 BeatSheet（含 estimated_words）
-        3. 无上述二者时回退到关键词识别 + 25% 均分
-        4. 根据 focus 类型注入扩写维度提示（expansion_hints）
+        1. 优先使用规划阶段的 BeatSheet（含 estimated_words）
+        2. 无 BeatSheet 时回退到关键词识别 + 25% 均分
+        3. 根据 focus 类型注入扩写维度提示（expansion_hints）
+        4. 不再强制 75% 缩减，相信规划阶段的预估
         5. 拍数上限 MAX_BEATS；每拍目标字数 < MIN_BEAT_WORDS 时合并相邻拍
         """
-        beats: List[Beat]
-        # === 路径 A：章前执行计划（与 DAG planning_outline_partition 同源）===
-        if chapter_execution_plan is not None and chapter_execution_plan.atoms:
-            beats = self._build_beats_from_execution_plan(
-                chapter_execution_plan, outline, target_chapter_words
-            )
-        # === 路径 B：有规划阶段的 BeatSheet ===
-        elif beat_sheet is not None and hasattr(beat_sheet, 'scenes') and beat_sheet.scenes:
+        # === 路径 A：有规划阶段的 BeatSheet ===
+        uses_expanded_outline = False
+        if beat_sheet is not None and hasattr(beat_sheet, 'scenes') and beat_sheet.scenes:
             beats = self._build_beats_from_beat_sheet(beat_sheet, outline, target_chapter_words)
         else:
-            # === 路径 C：无 Plan/BeatSheet，回退到关键词识别 ===
-            beats = self._build_beats_from_outline(chapter_number, outline, target_chapter_words)
+            # === 路径 B：无 BeatSheet，先扩成单元剧 + 情绪节点卡，再兼容为 Beat ===
+            beats = self._build_beats_from_expanded_outline(chapter_number, outline, target_chapter_words, novel_id=novel_id)
+            uses_expanded_outline = True
 
-        beats = self._cap_and_merge_beats(beats, target_chapter_words)
+        if not uses_expanded_outline:
+            beats = self._expand_beats_to_functional_arc(beats, target_chapter_words, outline)
+        beats = self._cap_and_merge_beats(beats, target_chapter_words, outline)
         self._bind_atg_locations_if_present(beats, scene_director)
         return beats
 
-    def _build_beats_from_execution_plan(
-        self,
-        plan: ChapterExecutionPlan,
-        outline: str,
-        target_chapter_words: int,
-    ) -> List[Beat]:
-        """将 ``ChapterExecutionPlan.atoms`` 投影为微观节拍（须落实章纲意图）。"""
-        atoms = plan.atoms
-        if not atoms:
-            return []
-        total_w = sum(max(0.01, float(a.weight)) for a in atoms)
-        mode = (plan.provenance or {}).get("mode", "")
-        logger.info(
-            "节拍放大器（章前执行计划）：%d 拍，provenance_mode=%s outline≈%d 字，整章目标 %d 字",
-            len(atoms),
-            mode,
-            len((outline or "").strip()),
-            target_chapter_words,
-        )
-        beats: List[Beat] = []
-        for atom in atoms:
-            intent = (atom.intent or "").strip()
-            if not intent:
-                continue
-            share = max(0.01, float(atom.weight)) / total_w
-            w = max(1, int(target_chapter_words * share))
-            ext = atom.extensions if isinstance(atom.extensions, dict) else {}
-            raw_focus = ext.get("focus") or ext.get("type")
-            if isinstance(raw_focus, str) and raw_focus.strip():
-                focus_s = raw_focus.strip()
-            else:
-                focus_s = self._infer_focus_from_outline(intent)
-            trans = ext.get("transition_from_prev")
-            transition = str(trans).strip() if trans else ""
-            loc_id = ext.get("location_id")
-            location_id = str(loc_id).strip() if isinstance(loc_id, str) and loc_id.strip() else ""
+    def _resolve_target_beat_count(self, target_chapter_words: int, outline: str = "") -> int:
+        """按章节字数与章纲复杂度动态估算节拍数。"""
+        text = (outline or "").strip()
+        segment_count = len(self._segment_user_outline(text)) if text else 0
 
-            beats.append(
+        # 章纲很短时，宁可保留 4 个完整场景拍，也不要拆成 6-7 个碎功能拍。
+        # 碎拍会诱导模型每拍只交付一句“功能完成”，最终形成短段拼贴。
+        if target_chapter_words <= 3200 and len(text) < 180 and 2 <= segment_count <= 4:
+            return segment_count
+
+        if target_chapter_words <= 1800:
+            base = 4
+        elif target_chapter_words <= 2400:
+            base = 5
+        elif target_chapter_words <= 3200:
+            base = 6
+        elif target_chapter_words <= 4200:
+            base = 7
+        elif target_chapter_words <= 8500:
+            base = 8
+        elif target_chapter_words <= 15000:
+            # 10000-15000 字不应压成一个超长单元剧，应允许两个单元剧的节点进入正文。
+            base = 16
+        else:
+            # 超长章节按 6000-7500 字一个单元剧继续扩容，拍数上限也必须随目标字数放大。
+            # 否则 30000/50000 字章节会被重新压回 24 拍，单节点又变成超长灌水容器。
+            dynamic_long_cap = max(self.LONG_CHAPTER_MAX_BEATS, (target_chapter_words + 749) // 750)
+            base = max(16, dynamic_long_cap)
+
+        complexity_bonus = 0
+        if len(text) >= 260:
+            complexity_bonus += 1
+        if segment_count >= 4:
+            complexity_bonus += 1
+        if target_chapter_words > 15000:
+            complexity_bonus += max(0, segment_count - 4)
+
+        if target_chapter_words <= 8500:
+            max_beats = self.MAX_BEATS
+        elif target_chapter_words <= 15000:
+            max_beats = self.LONG_CHAPTER_MAX_BEATS
+        else:
+            max_beats = max(self.LONG_CHAPTER_MAX_BEATS, (target_chapter_words + 599) // 600)
+        return max(4, min(max_beats, base + complexity_bonus))
+
+    def _resolve_min_beat_words(self, target_chapter_words: int) -> int:
+        """根据章节字数动态计算单拍最低目标字数。"""
+        if target_chapter_words <= 2200:
+            return 300
+        if target_chapter_words <= 3500:
+            return 350
+        if target_chapter_words <= 5000:
+            return 400
+        return 450
+
+    def _expand_beats_to_functional_arc(
+        self,
+        beats: List[Beat],
+        target_chapter_words: int,
+        outline: str = "",
+    ) -> List[Beat]:
+        """当章纲或 BeatSheet 过粗时，拆成可完成的功能节点。"""
+        if not beats:
+            return beats
+
+        desired_count = self._resolve_target_beat_count(target_chapter_words, outline)
+        if len(beats) >= max(4, desired_count - 1):
+            return beats
+
+        source_text = "\n".join(
+            p for p in [
+                (outline or "").strip(),
+                "\n".join(b.description for b in beats if b.description),
+            ]
+            if p
+        ).strip()
+        if not source_text:
+            source_text = beats[0].description
+
+        functions = [
+            ("hook", "起：明确主角当前目标、地点、必须现在行动的理由，并在前300字内给出读者抓手。"),
+            ("suspense", "承：让阻碍出现或升级，写清失败后果、资源压力、误判或关系压力。"),
+            ("action", "进：主角主动尝试改变局面，必须有具体动作、试探、交易、逃跑、救人或反击。"),
+            ("dialogue", "转：通过对白、对峙、发现或选择制造转折，让信息差或关系发生变化。"),
+            ("action", "兑：兑现一个小爽点或阶段结果，写清收获、代价、身份/资源/主动权变化。"),
+            ("suspense", "钩：收束本章故事单元，留下具体下一目标、新阻碍、倒计时、物件或未完成动作。"),
+        ]
+        if desired_count > len(functions):
+            functions.insert(4, ("action", "压：让对手、环境或规则追加压力，迫使主角付出更明确代价。"))
+            functions.insert(5, ("dialogue", "评：让他人反应落成实际变化，给主角新的筹码或风险。"))
+
+        selected = functions[:desired_count]
+        base_words = max(1, target_chapter_words // len(selected))
+        expanded: List[Beat] = []
+        for idx, (focus, duty) in enumerate(selected):
+            words = base_words
+            if idx == len(selected) - 1:
+                words = target_chapter_words - base_words * (len(selected) - 1)
+            expanded.append(
                 Beat(
                     description=(
-                        "【章纲节选·须落实】以下要点必须写入正文（可合理扩写，不得跳过核心因果；"
-                        "人物姓名须与 Bible 一致）：\n"
-                        + intent
+                        f"【功能节点·必须完成】{duty}\n"
+                        f"【章纲来源】{source_text}\n"
+                        "要求：只写本节点承担的进展，不能跳过后续节点，也不能重复已完成节点。"
                     ),
-                    target_words=w,
-                    focus=focus_s,
-                    expansion_hints=self._generate_expansion_hints(focus_s, w),
-                    scene_goal=intent,
-                    transition_from_prev=transition,
-                    location_id=location_id,
+                    target_words=max(self._resolve_min_beat_words(target_chapter_words), words),
+                    focus=focus,
+                    expansion_hints=self._generate_expansion_hints(focus, words),
                 )
             )
-        return beats
+
+        logger.info(
+            "节拍功能弧扩展：原 %d 拍 -> %d 拍，目标字数=%d",
+            len(beats),
+            len(expanded),
+            target_chapter_words,
+        )
+        return expanded
 
     def _bind_atg_locations_if_present(self, beats: List[Beat], scene_director: Optional[Any]) -> None:
         """若场记携带 ATG，将 visit_sequence 映射到各节拍。"""
@@ -412,19 +483,26 @@ class ContextBuilder:
             seq = [n.location_id for n in graph_payload.nodes if getattr(n, "location_id", "").strip()]
         assign_visit_locations_to_beats(beats, seq)
 
-    def _cap_and_merge_beats(self, beats: List[Beat], target_chapter_words: int) -> List[Beat]:
+    def _cap_and_merge_beats(self, beats: List[Beat], target_chapter_words: int, outline: str = "") -> List[Beat]:
         """控制节拍数量与最低字数。
 
         策略：
         1. 若 len(beats) > MAX_BEATS，按均分合并使总数降到 MAX_BEATS。
-        2. 若某拍 target_words < MIN_BEAT_WORDS，与下一拍合并（最后一拍与前一拍合并）。
+        2. 若某拍 target_words 过低，与相邻拍合并，避免碎拍灌水。
         3. 合并后重新均摊 target_words 使总字数维持接近 target_chapter_words。
         """
         if not beats:
             return beats
 
-        # 步骤 1：超过 MAX_BEATS 时按组合并
-        while len(beats) > self.MAX_BEATS:
+        desired_count = self._resolve_target_beat_count(target_chapter_words, outline)
+        has_node_cards = any(getattr(b, "beat_card", None) is not None for b in beats)
+        if has_node_cards:
+            # 节点卡已经完成单元剧/情绪节点规划，不再用旧的“目标拍数”把它们压扁。
+            desired_count = max(desired_count, len(beats))
+        min_beat_words = self._resolve_min_beat_words(target_chapter_words)
+
+        # 步骤 1：超过目标拍数时按组合并
+        while len(beats) > desired_count:
             # 找到相邻两拍中 target_words 之和最小的组合，合并掉一拍
             min_sum = None
             merge_idx = 0
@@ -435,12 +513,12 @@ class ContextBuilder:
                     merge_idx = i
             beats = self._merge_two_beats(beats, merge_idx)
 
-        # 步骤 2：每拍 < MIN_BEAT_WORDS 时合并
+        # 步骤 2：每拍过碎时合并
         changed = True
         while changed and len(beats) > 1:
             changed = False
             for i, b in enumerate(beats):
-                if b.target_words < self.MIN_BEAT_WORDS:
+                if b.target_words < min_beat_words:
                     # 与前一拍或后一拍合并（优先后一拍）
                     merge_idx = i if i < len(beats) - 1 else i - 1
                     beats = self._merge_two_beats(beats, merge_idx)
@@ -452,19 +530,39 @@ class ContextBuilder:
         if total_assigned > 0 and abs(total_assigned - target_chapter_words) > 200:
             ratio = target_chapter_words / total_assigned
             for b in beats:
-                b.target_words = max(self.MIN_BEAT_WORDS, int(b.target_words * ratio))
+                b.target_words = max(min_beat_words, int(b.target_words * ratio))
 
+        # 步骤 4：短章的节拍不要过碎，确保最后一拍仍有收束空间。
+        # 长章会由多个单元剧承载收束，不能再要求最后一个节点吃掉整章 18%。
+        if len(beats) > 1 and target_chapter_words <= 4200:
+            tail_floor = max(min_beat_words, int(target_chapter_words * 0.18))
+            if beats[-1].target_words < tail_floor and len(beats) > 2:
+                beats = self._merge_two_beats(beats, len(beats) - 2)
+
+        if beats:
+            assigned = sum(b.target_words for b in beats)
+            delta = target_chapter_words - assigned
+            if delta > 0:
+                beats[-1].target_words += delta
+            elif delta < 0 and beats[-1].target_words + delta >= min_beat_words:
+                beats[-1].target_words += delta
+
+        final_total = sum(b.target_words for b in beats)
+        target_delta = final_total - target_chapter_words
         logger.info(
-            "节拍整形：%d 拍，各拍字数=%s，总目标=%d",
+            "节拍整形：目标 %d 拍 -> 实际 %d 拍（低字数拍已合并），各拍字数=%s，总目标=%d，偏差=%+d",
+            desired_count,
             len(beats),
             [b.target_words for b in beats],
-            sum(b.target_words for b in beats),
+            final_total,
+            target_delta,
         )
         return beats
 
     def _merge_two_beats(self, beats: List[Beat], idx: int) -> List[Beat]:
         """将 beats[idx] 与 beats[idx+1] 合并为一拍。"""
         a, b = beats[idx], beats[idx + 1]
+        merged_card = self._merge_beat_cards(getattr(a, "beat_card", None), getattr(b, "beat_card", None))
         merged = Beat(
             description=f"{a.description} / {b.description}",
             target_words=a.target_words + b.target_words,
@@ -473,8 +571,43 @@ class ContextBuilder:
             scene_goal=f"{a.scene_goal or ''} {b.scene_goal or ''}".strip(),
             transition_from_prev=a.transition_from_prev or '',
             location_id=(a.location_id or b.location_id or "").strip(),
+            unit_id=(a.unit_id or b.unit_id or "").strip(),
+            beat_card=merged_card,
+            unit_plan=a.unit_plan or b.unit_plan,
         )
         return beats[:idx] + [merged] + beats[idx + 2:]
+
+    def _merge_beat_cards(
+        self,
+        first: Optional[EmotionBeatCard],
+        second: Optional[EmotionBeatCard],
+    ) -> Optional[EmotionBeatCard]:
+        """Merge node cards when beat shaping combines adjacent beats."""
+        if first is None:
+            return second
+        if second is None:
+            return first
+        merged = EmotionBeatCard(
+            beat_id=f"{first.beat_id}+{second.beat_id}",
+            unit_id=first.unit_id or second.unit_id,
+            title=f"{first.title} / {second.title}",
+            function=f"{first.function}；{second.function}",
+            target_words=first.target_words + second.target_words,
+            focus=first.focus or second.focus,
+            emotion_gap=f"{first.emotion_gap}；{second.emotion_gap}",
+            protagonist_goal=first.protagonist_goal or second.protagonist_goal,
+            obstacle_or_misbelief=f"{first.obstacle_or_misbelief}；{second.obstacle_or_misbelief}",
+            active_action=f"{first.active_action}；随后{second.active_action}",
+            external_feedback=f"{first.external_feedback}；随后{second.external_feedback}",
+            information_delta=f"{first.information_delta}；{second.information_delta}",
+            mini_payoff_or_pressure=f"{first.mini_payoff_or_pressure}；{second.mini_payoff_or_pressure}",
+            hook_delta=second.hook_delta or first.hook_delta,
+            sensory_anchor=f"{first.sensory_anchor}；{second.sensory_anchor}",
+            forbidden_drift=f"{first.forbidden_drift}；{second.forbidden_drift}",
+            acceptance_criteria=list(dict.fromkeys(first.acceptance_criteria + second.acceptance_criteria)),
+            source_outline=f"{first.source_outline}；{second.source_outline}",
+        )
+        return merged
 
     def _build_beats_from_beat_sheet(
         self,
@@ -524,6 +657,95 @@ class ContextBuilder:
             )
 
         return beats
+
+    def _build_beats_from_expanded_outline(
+        self,
+        chapter_number: int,
+        outline: str,
+        target_chapter_words: int,
+        *,
+        novel_id: str = "",
+    ) -> List[Beat]:
+        """Build beats from unit-drama plans and emotion node cards.
+
+        This is the default no-BeatSheet path. It keeps compatibility with the
+        existing Beat contract while making each beat carry a concrete mini arc:
+        emotion gap, protagonist action, external feedback, information delta,
+        payoff/pressure, and hook movement.
+        """
+        raw = (outline or "").strip()
+        if not raw:
+            return self._build_beats_from_outline(chapter_number, outline, target_chapter_words)
+
+        try:
+            plan = self.expanded_outline_service.expand(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                outline=raw,
+                target_words=target_chapter_words,
+            )
+        except Exception as exc:
+            logger.error("单元剧章纲扩写失败，拒绝回退旧功能标签节拍：%s", exc)
+            raise
+
+        units_by_id = {unit.unit_id: unit for unit in plan.units}
+        beats: List[Beat] = []
+        for idx, card in enumerate(plan.beat_cards):
+            unit = units_by_id.get(card.unit_id)
+            focus = card.focus or self._infer_focus_from_outline(card.source_outline)
+            beat = Beat(
+                description=self._format_beat_card_description(card, unit),
+                target_words=card.target_words,
+                focus=focus,
+                expansion_hints=self._node_card_expansion_hints(card, focus),
+                scene_goal=card.protagonist_goal,
+                transition_from_prev=self._transition_from_previous_card(plan.beat_cards, idx),
+                unit_id=card.unit_id,
+                beat_card=card,
+                unit_plan=unit,
+            )
+            beats.append(beat)
+
+        logger.info(
+            "单元剧章纲扩写：%d 个单元剧 -> %d 张情绪节点卡，目标字数=%d，节点字数=%s",
+            len(plan.units),
+            len(beats),
+            target_chapter_words,
+            [b.target_words for b in beats],
+        )
+        return beats
+
+    def _format_beat_card_description(
+        self,
+        card: EmotionBeatCard,
+        unit: Optional[UnitDramaPlan],
+    ) -> str:
+        return (
+            f"{card.to_prompt_block(unit)}\n\n"
+            "【正文执行要求】\n"
+            "只写本节点，不提前跳到后续节点。必须兑现节点卡的主动动作、外界反馈、信息差变化和钩子变化；"
+            "不能只完成“入局/压迫/转折”等功能标签。"
+        )
+
+    def _node_card_expansion_hints(self, card: EmotionBeatCard, focus: str) -> List[str]:
+        hints = [
+            f"主动动作必须写成可见动作：{card.active_action}",
+            f"动作后必须出现外界反馈：{card.external_feedback}",
+            f"信息差变化必须落地：{card.information_delta}",
+            f"本节点禁止漂移：{card.forbidden_drift}",
+        ]
+        base = self._generate_expansion_hints(focus, card.target_words)
+        return list(dict.fromkeys(hints + base))[:6]
+
+    def _transition_from_previous_card(self, cards: List[EmotionBeatCard], idx: int) -> str:
+        if idx <= 0:
+            return ""
+        prev = cards[idx - 1]
+        curr = cards[idx]
+        return (
+            f"承接上一节点的“{prev.hook_delta or prev.mini_payoff_or_pressure}”，"
+            f"开场直接推进到“{curr.active_action}”。"
+        )
 
     def _segment_user_outline(self, outline: str) -> List[str]:
         """将用户章纲拆成多条，供「章纲优先」节拍；支持编号列表、项目符号、空行段、单段按句切分。"""
@@ -624,7 +846,9 @@ class ContextBuilder:
             return beats
 
         beats = []
-        base_beat_words = max(400, int(target_chapter_words * 0.25))
+        base_beat_words = max(self.MIN_BEAT_WORDS, int(target_chapter_words * 0.25))
+        if target_chapter_words <= 2200:
+            base_beat_words = max(300, int(target_chapter_words * 0.2))
 
         # 开篇黄金法则前三章特殊拦截
         if chapter_number == 1:
@@ -638,14 +862,14 @@ class ContextBuilder:
                 Beat(
                     description="剧情引入及人物初步互动：展现主角特质并暗示即将发生的事件",
                     target_words=int(base_beat_words * 1.5),
-                    focus="character_intro",
-                    expansion_hints=self._generate_expansion_hints("character_intro", int(base_beat_words * 1.5)),
+                    focus="dialogue",
+                    expansion_hints=self._generate_expansion_hints("dialogue", int(base_beat_words * 1.5)),
                 ),
                 Beat(
                     description="世界观或当前场景细节：通过具体行动展现，不用抽象叙述",
                     target_words=int(base_beat_words * 1.3),
-                    focus="sensory",
-                    expansion_hints=self._generate_expansion_hints("sensory", int(base_beat_words * 1.3)),
+                    focus="action",
+                    expansion_hints=self._generate_expansion_hints("action", int(base_beat_words * 1.3)),
                 ),
                 Beat(
                     description="埋下后续剧情伏笔或抛出首个悬念：铺垫第二章",
@@ -671,8 +895,8 @@ class ContextBuilder:
                 Beat(
                     description="情绪细节及内心活动：展示人物面对变故的真实反映",
                     target_words=int(base_beat_words * 1.0),
-                    focus="emotion",
-                    expansion_hints=self._generate_expansion_hints("emotion", int(base_beat_words * 1.0)),
+                    focus="suspense",
+                    expansion_hints=self._generate_expansion_hints("suspense", int(base_beat_words * 1.0)),
                 ),
                 Beat(
                     description="为第三章冲突高潮做气氛铺垫",
@@ -686,8 +910,8 @@ class ContextBuilder:
                 Beat(
                     description="前三章的剧情小结或高潮前奏：紧张气氛描写",
                     target_words=int(base_beat_words * 1.0),
-                    focus="sensory",
-                    expansion_hints=self._generate_expansion_hints("sensory", int(base_beat_words * 1.0)),
+                    focus="action",
+                    expansion_hints=self._generate_expansion_hints("action", int(base_beat_words * 1.0)),
                 ),
                 Beat(
                     description="冲突爆发/悬念高潮：激烈的动作或对峙",
@@ -756,7 +980,7 @@ class ContextBuilder:
             return "suspense"
         if any(kw in combined for kw in ["情绪", "内心", "回忆"]):
             return "emotion"
-        return "sensory"
+        return "action"
 
     def _generate_expansion_hints(self, focus: str, target_words: int) -> List[str]:
         """根据 focus 类型和目标字数生成扩写维度提示"""
@@ -777,10 +1001,10 @@ class ContextBuilder:
         """构建冲突场景的节拍"""
         return [
             Beat(
-                description="场景氛围描写：压抑的环境、紧张的气氛、人物的微表情",
+                description="冲突前压：主角目标被卡住，对手或规则给出明确后果",
                 target_words=int(base_beat_words * 0.9),
-                focus="sensory",
-                expansion_hints=self._generate_expansion_hints("sensory", int(base_beat_words * 0.9)),
+                focus="suspense",
+                expansion_hints=self._generate_expansion_hints("suspense", int(base_beat_words * 0.9)),
             ),
             Beat(
                 description="冲突爆发：主角的质问、对方的反应、情绪的升级",
@@ -789,10 +1013,10 @@ class ContextBuilder:
                 expansion_hints=self._generate_expansion_hints("dialogue", int(base_beat_words * 1.4)),
             ),
             Beat(
-                description="情绪细节：内心独白、回忆闪回、痛苦的挣扎",
+                description="选择转折：主角在压力下做出决定，带来代价或新风险",
                 target_words=int(base_beat_words * 1.2),
-                focus="emotion",
-                expansion_hints=self._generate_expansion_hints("emotion", int(base_beat_words * 1.2)),
+                focus="action",
+                expansion_hints=self._generate_expansion_hints("action", int(base_beat_words * 1.2)),
             ),
             Beat(
                 description="冲突结果：决裂、离开、或暂时妥协（不要轻易和好）",
@@ -806,10 +1030,10 @@ class ContextBuilder:
         """构建战斗场景的节拍"""
         return [
             Beat(
-                description="战前准备：环境描写、双方对峙、紧张的气氛",
+                description="战前目标：主角必须赢下或逃出这一局，写清失败后果和战场限制",
                 target_words=int(base_beat_words * 0.7),
-                focus="sensory",
-                expansion_hints=self._generate_expansion_hints("sensory", int(base_beat_words * 0.7)),
+                focus="suspense",
+                expansion_hints=self._generate_expansion_hints("suspense", int(base_beat_words * 0.7)),
             ),
             Beat(
                 description="第一回合：试探性攻击、展示能力、观察弱点",
@@ -824,10 +1048,10 @@ class ContextBuilder:
                 expansion_hints=self._generate_expansion_hints("action", int(base_beat_words * 1.2)),
             ),
             Beat(
-                description="转折点：意外发生、底牌揭露、或受伤",
+                description="转折点：意外发生、底牌揭露、受伤或资源损失，迫使主角改策略",
                 target_words=int(base_beat_words * 0.9),
-                focus="emotion",
-                expansion_hints=self._generate_expansion_hints("emotion", int(base_beat_words * 0.9)),
+                focus="action",
+                expansion_hints=self._generate_expansion_hints("action", int(base_beat_words * 0.9)),
             ),
             Beat(
                 description="战斗结束：胜负揭晓、战后状态、后续影响",
@@ -841,10 +1065,10 @@ class ContextBuilder:
         """构建真相揭露场景的节拍"""
         return [
             Beat(
-                description="线索汇聚：主角回忆之前的疑点、逐步推理",
+                description="线索逼近：主角用已有事实试探或验证，不能只回忆和心理推演",
                 target_words=int(base_beat_words * 1.2),
-                focus="emotion",
-                expansion_hints=self._generate_expansion_hints("emotion", int(base_beat_words * 1.2)),
+                focus="suspense",
+                expansion_hints=self._generate_expansion_hints("suspense", int(base_beat_words * 1.2)),
             ),
             Beat(
                 description="真相揭露：关键证据出现、震惊的反应、世界观崩塌",
@@ -853,10 +1077,10 @@ class ContextBuilder:
                 expansion_hints=self._generate_expansion_hints("dialogue", int(base_beat_words * 1.8)),
             ),
             Beat(
-                description="情绪余波：接受现实、决定下一步行动",
+                description="结果落地：真相改变资源、关系、身份或下一步目标",
                 target_words=int(base_beat_words * 1.3),
-                focus="emotion",
-                expansion_hints=self._generate_expansion_hints("emotion", int(base_beat_words * 1.3)),
+                focus="action",
+                expansion_hints=self._generate_expansion_hints("action", int(base_beat_words * 1.3)),
             ),
         ]
 
@@ -866,8 +1090,8 @@ class ContextBuilder:
             Beat(
                 description="起：交代场景与人物状态，抛出本章要处理的具体麻烦或悬念（可小但须清晰）。",
                 target_words=base_beat_words,
-                focus="sensory",
-                expansion_hints=self._generate_expansion_hints("sensory", base_beat_words),
+                focus="hook",
+                expansion_hints=self._generate_expansion_hints("hook", base_beat_words),
             ),
             Beat(
                 description="承：阻碍升级或对手施压，人物关系或信息出现新变化。",
@@ -903,17 +1127,16 @@ class ContextBuilder:
         focus_instructions = registry.get_directives_dict(self._BEAT_PROMPT_ID, "_focus_instructions")
         instruction = focus_instructions.get(beat.focus, "")
 
-        # 感官锚点轮转
-        sensory_rotation = registry.get_list_field(self._BEAT_PROMPT_ID, "_sensory_rotation")
-        if not sensory_rotation:
-            # 安全降级
-            sensory_rotation = [
-                "本节拍至少一处环境锚点：光影或空间层次。",
-                "本节拍至少一处环境锚点：温度、体感或材质。",
-                "本节拍至少一处环境锚点：声音或节奏。",
-                "本节拍至少一处环境锚点：气味或味觉细节。",
+        # 行动后果锚点轮转
+        action_rotation = registry.get_list_field(self._BEAT_PROMPT_ID, "_sensory_rotation")
+        if not action_rotation:
+            action_rotation = [
+                "本节拍至少一处行动后果锚点：位置变化、资源得失、身份暴露或关系变化。",
+                "本节拍至少一处选择后果锚点：主角做出具体判断，并立刻产生代价或收益。",
+                "本节拍至少一处信息差锚点：读者知道了新事实，主角也必须因此调整。",
+                "本节拍至少一处局势锚点：对手、同伴或规则的态度发生可见变化。",
             ]
-        anchor_line = sensory_rotation[beat_index % len(sensory_rotation)]
+        anchor_line = action_rotation[beat_index % len(action_rotation)]
 
         # 叙事义务
         obligations = registry.get_field(self._BEAT_PROMPT_ID, "_obligations", {})
@@ -927,6 +1150,19 @@ class ContextBuilder:
         if beat.expansion_hints:
             hints_text = "\n".join(f"- {hint}" for hint in beat.expansion_hints)
             expansion_block = f"\n\n【字数扩充方向】（请参考以下方向展开细节）\n{hints_text}"
+
+        node_card_block = ""
+        card = getattr(beat, "beat_card", None)
+        if card is not None:
+            node_card_block = (
+                "\n\n【节点卡兑现要求】\n"
+                f"- 必须写出主动动作：{card.active_action}\n"
+                f"- 必须写出动作后的外界反馈：{card.external_feedback}\n"
+                f"- 必须写出信息差变化：{card.information_delta}\n"
+                f"- 必须推进钩子变化：{card.hook_delta}\n"
+                f"- 禁止漂移：{card.forbidden_drift}\n"
+                "- 不要把这些字段解释给读者看，要把它们写成正文里的动作、反应、发现和选择。"
+            )
 
         # 使用 PromptRegistry 渲染 user 模板
         rendered = registry.render(
@@ -949,7 +1185,12 @@ class ContextBuilder:
             # 在 "密度与可检查要求" 之后插入
             prompt = prompt.replace(
                 "\n\n⚠️ 篇幅控制",
-                f"{expansion_block}\n\n⚠️ 篇幅控制"
+                f"{expansion_block}{node_card_block}\n\n⚠️ 篇幅控制"
+            )
+        elif node_card_block:
+            prompt = prompt.replace(
+                "\n\n⚠️ 篇幅控制",
+                f"{node_card_block}\n\n⚠️ 篇幅控制"
             )
 
         # 🔗 V2：注入节拍间过渡方式

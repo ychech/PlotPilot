@@ -1,0 +1,21 @@
+name: 单元剧闭环验收协议
+category: review
+source: application/engine/services/expanded_outline_validators.py::UnitDramaValidator
+description: 整章或单元剧完成后检查目标、阻碍、爽点、代价与下一钩子是否闭环
+builtin: true
+tags:
+- 单元剧
+- 闭环验收
+- 章节完成闸门
+output_format: json
+variables:
+- name: unit_drama
+  desc: 单元剧规划
+  type: string
+  required: true
+- name: realized_nodes
+  desc: 已通过的节点兑现结果
+  type: string
+  required: true
+id: unit-drama-validation
+sort_order: 37

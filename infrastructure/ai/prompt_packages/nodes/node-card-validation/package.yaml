@@ -1,0 +1,17 @@
+name: 节点卡验收协议
+category: review
+source: application/engine/services/expanded_outline_validators.py::NodeCardValidator
+description: 正文生成前验收情绪/爽点节点卡，阻止空心节点进入正文阶段
+builtin: true
+tags:
+- 节点卡
+- 验收
+- 反空转
+output_format: json
+variables:
+- name: node_cards_json
+  desc: 节点卡 JSON
+  type: string
+  required: true
+id: node-card-validation
+sort_order: 35

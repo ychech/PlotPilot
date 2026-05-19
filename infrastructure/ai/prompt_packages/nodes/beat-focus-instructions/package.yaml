@@ -1,13 +1,13 @@
-name: 微观节拍 · 聚焦指令集
+name: 微观节拍 · 落实指令集
 category: generation
 source: application/engine/services/context_builder.py::build_beat_prompt()
-description: Beat Magnifier 节拍放大器：7+种节拍类型的聚焦指令 + 感官锚点轮转 + 叙事义务
+description: Beat Implementer 节拍落实器：按300-500字节点完成目标、阻碍、行动、反馈与钩子，禁止感官堆叠灌字
 builtin: true
 tags:
 - 核心
 - 节拍
-- Beat Magnifier
-- 感官
+- Beat Implementer
+- 章纲闭环
 - 对话
 output_format: text
 variables:
@@ -30,7 +30,7 @@ variables:
   desc: 节拍内容描述
   type: string
 - name: anchor_line
-  desc: 环境锚点轮转行
+  desc: 行动后果锚点
   type: string
 - name: obligation
   desc: 叙事义务

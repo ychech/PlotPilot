@@ -8,6 +8,7 @@ from application.workflows.auto_novel_generation_workflow import (
     assemble_chapter_bundle_context_text,
 )
 from application.engine.dtos.generation_result import GenerationResult
+from application.engine.dtos.expanded_outline_dto import EmotionBeatCard
 from application.engine.dtos.scene_director_dto import SceneDirectorAnalysis
 from application.engine.services.context_builder import ContextBuilder
 from domain.novel.services.consistency_checker import ConsistencyChecker
@@ -292,6 +293,41 @@ class TestBuildPrompt:
         assert "主线" in prompt.system
         assert "HIGH" in prompt.system
         assert "CTX" in prompt.system
+
+    def test_build_prompt_accepts_structured_beat_card(self, workflow):
+        card = EmotionBeatCard(
+            beat_id="u1-b1",
+            unit_id="u1",
+            title="血饵处境",
+            function="建立目标、危险和读者情绪缺口",
+            target_words=500,
+            focus="hook",
+            emotion_gap="读者想看云泽不是等死废物",
+            protagonist_goal="先活下来",
+            obstacle_or_misbelief="三叔公把他当血饵",
+            active_action="停止乱挣，检查死结和兽群动静",
+            external_feedback="兽群没有立刻扑杀",
+            information_delta="献祭不是简单灭口",
+            mini_payoff_or_pressure="主角摸到规则",
+            hook_delta="这场献祭不只是喂兽",
+            sensory_anchor="绳索勒痛、血味、兽群位置",
+            forbidden_drift="禁止纯氛围",
+        )
+
+        prompt = workflow.build_chapter_prompt(
+            "context",
+            "outline",
+            beat_prompt="beat prompt",
+            beat_index=0,
+            total_beats=4,
+            beat_target_words=500,
+            beat_card=card,
+        )
+
+        assert "结构化节点卡" in prompt.user
+        assert "停止乱挣" in prompt.user
+        assert "兽群没有立刻扑杀" in prompt.user
+        assert "以节点卡为准" in prompt.user
 
 class TestConflictDetectionIntegration:
     """测试冲突检测集成"""

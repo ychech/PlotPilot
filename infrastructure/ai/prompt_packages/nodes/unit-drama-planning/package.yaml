@@ -1,0 +1,29 @@
+name: 单元剧规划协议
+category: planning
+source: application/engine/services/unit_drama_planner.py
+description: 将原始章纲按目标字数规划为一个或多个网文单元剧，先确定目标、阻碍、转折、爽点、代价和钩子
+builtin: true
+tags:
+- 单元剧
+- 章纲扩写
+- 网文节奏
+output_format: json
+variables:
+- name: outline
+  desc: 原始章节大纲
+  type: string
+  required: true
+- name: target_words
+  desc: 本章目标字数
+  type: integer
+  required: true
+- name: chapter_number
+  desc: 章节号
+  type: integer
+  required: true
+- name: genre
+  desc: 类型标签
+  type: string
+  default: ''
+id: unit-drama-planning
+sort_order: 33

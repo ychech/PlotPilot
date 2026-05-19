@@ -10,4 +10,6 @@
 7. metaphor_usage: 比喻、暗喻等修辞的密度
 8. sentence_variety: 长短句交错、句式结构的复杂变幻度
 
+分析时注意：description_depth 不是形容词越多越高，只有服务动作、判断、危险、信息差的描写才算有效；sensory_richness 需区分有效感官和无效堆叠；metaphor_usage 需识别“不是……是……”解释腔、重复意象和虚神秘词是否过量。
+
 只允许输出 JSON 键值对，无需附言。

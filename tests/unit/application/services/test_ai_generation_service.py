@@ -241,6 +241,8 @@ class TestAIGenerationService:
         # 验证 user message
         assert "第5章" in prompt.user
         assert "测试大纲内容" in prompt.user
+        assert "单元剧与情绪节点卡" in prompt.user
+        assert "主动动作" in prompt.user
 
     @pytest.mark.asyncio
     async def test_generate_chapter_empty_outline(
@@ -296,4 +298,3 @@ class TestAIGenerationService:
         # 验证调用了仓储
         mock_novel_repository.get_by_id.assert_called_once()
         mock_bible_repository.get_by_novel_id.assert_called_once()
-

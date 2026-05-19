@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="python-3.11.9-embed-amd64">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/tools/python-3.11.9-embed-amd64.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

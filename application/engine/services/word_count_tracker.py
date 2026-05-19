@@ -34,7 +34,7 @@
         # 5. 报告实际字数
         deviation = conductor.report_actual(len(content))
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import List, Optional
 import logging
@@ -107,14 +107,14 @@ class ChapterConductor:
 
     # ── 收束指令模板 ──
     _UNFURL_INSTRUCTION = (
-        "📖【铺陈阶段】本章还有充足的篇幅空间。"
-        "尽情展开：冲突要充分碰撞，对话要你来我往，感官细节要细腻。"
-        "不要急于推进下一个情节点——让当前场景充分发酵。"
+        "📖【展开阶段】本章还有充足的篇幅空间。"
+        "展开当前节点的目标、阻碍、行动和反馈，但不要用感官、回忆或同义反复灌字。"
+        "每一段都要让局势有可复述变化。"
     )
 
     _CONVERGE_INSTRUCTION = (
         "⚡【收束阶段】本章字数池已消耗过半。开始收紧节奏：\n"
-        "• 场景转换加速——一个眼神、一句话就能交代清楚的，不要铺陈整段\n"
+        "• 场景转换加速——一句话能交代清楚的，不要铺陈整段\n"
         "• 对话变精炼——删掉寒暄和同义反复，只留有信息增量的对白\n"
         "• 叙述变紧凑——环境描写点到即止，用一两个精准细节代替全景扫描\n"
         "• 情节主线优先——支线细节如果不在本章闭合，一笔带过\n"
@@ -124,9 +124,9 @@ class ChapterConductor:
 
     _LAND_INSTRUCTION = (
         "🎯【着陆阶段】本章即将结束，必须立即收住！\n"
-        "• 用最后一个完整的场景画面收束——一个动作、一个表情、一句有分量的话\n"
-        "• 绝不开启新的场景或新的对话回合\n"
-        "• 如果有下一章的钩子，用一句暗示性的短句点一下即可，不要展开\n"
+        "• 完成本节拍承担的章纲功能，给出阶段结果、收获/代价或信息差变化\n"
+        "• 不开启新的长场景，但可以用一个具体动作、物件、地点、倒计时或威胁接出钩子\n"
+        "• 如果前面节拍尚未兑现章纲结果，先兑现再留钩\n"
         "• 结尾必须是完整的句子（以句号等结束），绝不留下半句话\n"
         "• 确保与上一节拍形成完整的叙事弧线，给读者满足感\n"
         "• ⚠️ 着陆收束仍须保持段落完整性——同一个画面的动作、感官、心理合并在同一段，不要因收尾急促而退化为一句一行的碎片"
@@ -134,10 +134,10 @@ class ChapterConductor:
 
     _FINAL_BEAT_HINT = (
         "📌 这是本章最后一个节拍！章节必须在此结束：\n"
-        "1. 给出完整的段落收尾——故事告一段落，读者能感知到「这一章讲完了」\n"
-        "2. 留一个悬念钩子——让读者想翻下一页，但不要强行总结\n"
-        "3. 用有画面感的方式结束——最后一个画面留在读者脑海中\n"
-        "4. 绝对不能留下悬而未决的对话或行动"
+        "1. 给出阶段结果：主角获得/失去/知道/暴露了什么\n"
+        "2. 留一个具体钩子：人、物、地点、倒计时、明确威胁或未完成动作\n"
+        "3. 用动作、画面或对白结束，禁止哲学总结\n"
+        "4. 绝对不能留下半句、半个对话回合或未完成的本章任务"
     )
 
     def __init__(
@@ -237,8 +237,11 @@ class ChapterConductor:
         else:
             suggested_max = max(self.MIN_BEAT_WORDS, remaining_budget)
 
-        # 物理硬上限（超出则智能截断）—— 给 15% 的弹性空间
-        hard_cap = int(suggested_max * 1.15) if suggested_max > 0 else 0
+        if is_final_beat:
+            suggested_max = max(suggested_max, min(remaining_budget, int(self.total_budget * 0.18)))
+
+        # 物理硬上限（超出则智能截断）——最后节拍给更大弹性，优先保证收束和钩子完整
+        hard_cap = int(suggested_max * (1.35 if is_final_beat else 1.15)) if suggested_max > 0 else 0
 
         return ConductorSignal(
             phase=current_phase,

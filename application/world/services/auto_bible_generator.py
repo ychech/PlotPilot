@@ -1051,7 +1051,7 @@ JSON 格式：
         result = await self.llm_service.generate(prompt, config)
         return (result.content or "").strip()
 
-    # 维度定义：key → (label, field_definitions)
+    # 维度定义与 worldbuilding 表结构保持一致；这里只列可真正入库的字段。
     _DIMENSION_DEFS = {
         "core_rules": {
             "label": "核心法则",
@@ -1059,8 +1059,6 @@ JSON 格式：
                 "power_system": "力量体系/科技树的描述",
                 "physics_rules": "物理规律的特殊之处",
                 "magic_tech": "魔法或科技的运作机制",
-                "cost_and_limitation": "力量使用的代价与限制（修炼消耗、越级代价、禁忌代价）",
-                "resource_scarcity": "稀缺资源及其分配（硬通货、垄断情况）",
             },
         },
         "geography": {
@@ -1070,9 +1068,6 @@ JSON 格式：
                 "climate": "气候特点与环境",
                 "resources": "自然资源分布",
                 "ecology": "生态系统与生物链",
-                "forbidden_zones": "禁区/危险区域",
-                "urban_core": "核心城市/聚居地",
-                "hidden_realms": "秘境/隐藏空间",
             },
         },
         "society": {
@@ -1081,9 +1076,6 @@ JSON 格式：
                 "politics": "政治体制与权力架构",
                 "economy": "经济模式与贸易",
                 "class_system": "阶级/等级系统",
-                "power_structure": "明暗权力结构（明面与暗面的统治体系）",
-                "oppression_mechanism": "压迫/控制机制（强者如何压制弱者）",
-                "class_division": "阶层划分与流动壁垒",
             },
         },
         "culture": {
@@ -1092,8 +1084,6 @@ JSON 格式：
                 "history": "关键历史事件与时代背景",
                 "religion": "宗教信仰体系",
                 "taboos": "文化禁忌与违逆后果",
-                "worship": "崇拜对象与祭祀仪式",
-                "oaths_and_curses": "誓言体系与诅咒",
             },
         },
         "daily_life": {
@@ -1102,13 +1092,74 @@ JSON 格式：
                 "food_clothing": "衣食住行的日常细节",
                 "language_slang": "俚语、口音与方言",
                 "entertainment": "娱乐方式与消遣",
-                "survival_tactics": "底层/弱者的生存策略",
-                "market_reality": "市场/交易的真实状况",
-                "food_and_drink": "饮食文化与特色食物",
-                "slang_and_profanity": "粗话、黑话与市井语言",
             },
         },
     }
+
+    def _normalize_dimension_for_storage(self, dim_key: str, dim_data: Any) -> Dict[str, str]:
+        """只保留可入库标准字段；不做语义别名映射。"""
+        dim_def = self._DIMENSION_DEFS.get(dim_key)
+        if not dim_def or not isinstance(dim_data, dict):
+            return {}
+
+        allowed = set(dim_def["fields"].keys())
+        normalized: Dict[str, str] = {}
+        rejected: list[str] = []
+        for key, value in dim_data.items():
+            if key not in allowed:
+                rejected.append(str(key))
+                continue
+            if isinstance(value, str):
+                text = value.strip()
+            elif isinstance(value, (list, dict)):
+                text = json.dumps(value, ensure_ascii=False)
+            else:
+                text = str(value).strip() if value is not None else ""
+            if text:
+                normalized[key] = text
+
+        if rejected:
+            logger.warning(
+                "Worldbuilding dimension %s ignored non-storage fields: %s",
+                dim_key,
+                rejected,
+            )
+        return normalized
+
+    async def _complete_dimension_storage_fields(
+        self,
+        premise: str,
+        target_chapters: int,
+        dim_key: str,
+        dim_data: Dict[str, str],
+        existing_worldbuilding: Dict[str, Any] | None = None,
+    ) -> Dict[str, str]:
+        """补齐同一维度中缺失的可入库字段；只按标准字段生成，不洗错 key。"""
+        dim_def = self._DIMENSION_DEFS.get(dim_key)
+        if not dim_def:
+            return dim_data
+
+        completed = dict(dim_data)
+        missing = [
+            field_key
+            for field_key in dim_def["fields"]
+            if not str(completed.get(field_key) or "").strip()
+        ]
+        if missing:
+            logger.warning("Worldbuilding dimension %s missing storage fields: %s", dim_key, missing)
+
+        for field_key in missing:
+            generated = await self._generate_single_field(
+                premise,
+                target_chapters,
+                dim_key,
+                field_key,
+                existing_worldbuilding,
+                completed,
+            )
+            if generated:
+                completed[field_key] = generated
+        return completed
 
     async def _generate_single_dimension(
         self,
@@ -1204,15 +1255,14 @@ JSON 格式：
             if not isinstance(result, dict):
                 logger.warning("Dimension %s LLM returned non-dict: %s", dim_key, type(result))
                 return {}
-            # 标准化：只保留已定义的字段，但也不丢弃 LLM 生成的有效额外字段
-            normalized = {}
-            for k, v in result.items():
-                if isinstance(v, str) and v.strip():
-                    normalized[k] = v.strip()
-                elif isinstance(v, (list, dict)):
-                    # LLM 偶尔返回嵌套结构，扁平化处理
-                    normalized[k] = str(v)
-            return normalized
+            normalized = self._normalize_dimension_for_storage(dim_key, result)
+            return await self._complete_dimension_storage_fields(
+                premise,
+                target_chapters,
+                dim_key,
+                normalized,
+                existing_worldbuilding,
+            )
         except Exception as e:
             logger.error("Failed to generate dimension %s: %s", dim_key, e)
             return {}
@@ -1433,33 +1483,19 @@ JSON 格式：
         "power_system": "力量体系",
         "physics_rules": "物理规律",
         "magic_tech": "魔法/科技",
-        "cost_and_limitation": "代价与限制",
-        "resource_scarcity": "稀缺资源",
         "terrain": "地形",
         "climate": "气候",
         "resources": "资源",
         "ecology": "生态",
-        "forbidden_zones": "禁区",
-        "urban_core": "核心城市",
-        "hidden_realms": "秘境",
         "politics": "政治体制",
         "economy": "经济模式",
         "class_system": "阶级系统",
-        "power_structure": "权力结构",
-        "oppression_mechanism": "压迫机制",
-        "class_division": "阶层划分",
         "history": "历史事件",
         "religion": "宗教信仰",
         "taboos": "文化禁忌",
-        "worship": "崇拜与祭祀",
-        "oaths_and_curses": "誓言与诅咒",
         "food_clothing": "衣食住行",
         "language_slang": "俚语与口音",
         "entertainment": "娱乐方式",
-        "survival_tactics": "生存策略",
-        "market_reality": "市场状况",
-        "food_and_drink": "饮食文化",
-        "slang_and_profanity": "粗话与黑话",
     }
 
     async def _generate_characters(self, premise: str, target_chapters: int, worldbuilding: Dict[str, Any]) -> Dict[str, Any]:
@@ -1944,4 +1980,3 @@ JSON 格式：
                         logger.info(f"Created triple: {loc_data['name']} -{predicate}-> {target_name}")
                     except Exception as e:
                         logger.error(f"Failed to save triple: {e}")
-

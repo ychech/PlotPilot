@@ -410,3 +410,113 @@ class TestContextBuilder:
 
         total_tokens = structured["token_usage"]["total"]
         assert total_tokens <= 5500
+
+
+def test_short_four_segment_outline_keeps_coarse_scene_beats():
+    builder = _make_builder()
+    outline = (
+        "云泽被三叔公以血饲雷兽之名扔进化形雷兽森林。"
+        "雷瘴前夕，无数雷兽潜伏，云泽经脉枯竭，沦为饵食。"
+        "狼形雷兽利爪撕裂肩胛。"
+        "云泽血脉中沉睡的先天雷骨苏醒。"
+    )
+
+    beats = builder.magnify_outline_to_beats(
+        chapter_number=1,
+        outline=outline,
+        target_chapter_words=2500,
+    )
+
+    assert len(beats) == 4
+    assert sum(b.target_words for b in beats) >= 2500
+    assert all(b.target_words >= 350 for b in beats)
+    assert all(b.beat_card is not None for b in beats)
+    assert all("情绪缺口" in b.description for b in beats)
+    assert all("主动动作" in b.description for b in beats)
+    assert all("外界反馈" in b.description for b in beats)
+    assert all("信息差变化" in b.description for b in beats)
+
+
+def test_beat_prompt_preserves_node_card_realization_fields():
+    builder = _make_builder()
+    outline = (
+        "云泽被三叔公以血饲雷兽之名扔进化形雷兽森林。"
+        "雷瘴前夕，无数雷兽潜伏，云泽经脉枯竭，沦为饵食。"
+        "狼形雷兽利爪撕裂肩胛。"
+        "云泽血脉中沉睡的先天雷骨苏醒。"
+    )
+
+    beats = builder.magnify_outline_to_beats(
+        chapter_number=1,
+        outline=outline,
+        target_chapter_words=2500,
+    )
+    prompt = builder.build_beat_prompt(beats[0], 0, len(beats))
+
+    assert "节点卡兑现要求" in prompt
+    assert "必须写出主动动作" in prompt
+    assert "必须写出动作后的外界反馈" in prompt
+    assert "必须写出信息差变化" in prompt
+    assert "不要把这些字段解释给读者看" in prompt
+
+
+def test_very_long_outline_plan_allows_two_unit_drama_node_sets():
+    builder = _make_builder()
+    outline = (
+        "云泽被三叔公以血饲雷兽之名扔进化形雷兽森林。"
+        "雷瘴前夕，无数雷兽潜伏，云泽经脉枯竭，沦为饵食。"
+        "狼形雷兽利爪撕裂肩胛。"
+        "云泽血脉中沉睡的先天雷骨苏醒。"
+    )
+
+    beats = builder.magnify_outline_to_beats(
+        chapter_number=1,
+        outline=outline,
+        target_chapter_words=15000,
+    )
+
+    assert len(beats) == 16
+    assert {b.unit_id for b in beats} == {"u1", "u2"}
+    assert sum(b.target_words for b in beats) == 15000
+
+
+def test_super_long_outline_plan_is_not_recompressed_to_static_cap():
+    builder = _make_builder()
+    outline = (
+        "云泽被三叔公以血饲雷兽之名扔进化形雷兽森林。"
+        "雷瘴前夕，无数雷兽潜伏，云泽经脉枯竭，沦为饵食。"
+        "狼形雷兽利爪撕裂肩胛。"
+        "云泽血脉中沉睡的先天雷骨苏醒。"
+    )
+
+    beats = builder.magnify_outline_to_beats(
+        chapter_number=1,
+        outline=outline,
+        target_chapter_words=30000,
+    )
+
+    assert len(beats) > builder.LONG_CHAPTER_MAX_BEATS
+    assert {b.unit_id for b in beats} == {"u1", "u2", "u3", "u4"}
+    assert sum(b.target_words for b in beats) == 30000
+    assert max(b.target_words for b in beats) <= 1000
+
+
+def test_merge_two_beats_preserves_and_merges_node_cards():
+    builder = _make_builder()
+    beats = builder.magnify_outline_to_beats(
+        chapter_number=1,
+        outline=(
+            "云泽被三叔公以血饲雷兽之名扔进化形雷兽森林。"
+            "雷瘴前夕，无数雷兽潜伏，云泽经脉枯竭，沦为饵食。"
+            "狼形雷兽利爪撕裂肩胛。"
+            "云泽血脉中沉睡的先天雷骨苏醒。"
+        ),
+        target_chapter_words=2500,
+    )
+
+    merged = builder._merge_two_beats(beats, 0)[0]
+
+    assert merged.beat_card is not None
+    assert "随后" in merged.beat_card.active_action
+    assert beats[0].beat_card.active_action in merged.beat_card.active_action
+    assert beats[1].beat_card.external_feedback in merged.beat_card.external_feedback

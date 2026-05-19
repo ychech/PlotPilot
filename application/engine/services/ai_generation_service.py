@@ -9,6 +9,7 @@ from domain.novel.value_objects.novel_id import NovelId
 from domain.novel.entities.novel import Novel
 from domain.bible.entities.bible import Bible
 from domain.shared.exceptions import EntityNotFoundError
+from application.engine.services.expanded_outline_service import ExpandedOutlineService
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class AIGenerationService:
         self.llm_service = llm_service
         self.novel_repository = novel_repository
         self.bible_repository = bible_repository
+        self.expanded_outline_service = ExpandedOutlineService()
 
     async def generate_chapter(
         self,
@@ -122,6 +124,27 @@ class AIGenerationService:
             ])
             system_message += f"\n\n世界设定：\n{setting_info}"
 
-        user_message = f"请根据以下大纲创作第{chapter_number}章：\n\n{outline}"
+        expanded_outline_block = ""
+        try:
+            target_words = int(getattr(novel, "target_words_per_chapter", None) or 2500)
+            novel_id_value = getattr(getattr(novel, "novel_id", None), "value", "") or getattr(novel, "id", "")
+            plan = self.expanded_outline_service.expand(
+                novel_id=str(novel_id_value or ""),
+                chapter_number=chapter_number,
+                outline=outline,
+                target_words=target_words,
+            )
+            node_cards = "\n\n".join(card.to_prompt_block() for card in plan.beat_cards)
+            expanded_outline_block = (
+                "\n\n【单元剧与情绪节点卡（必须按顺序兑现）】\n"
+                f"{node_cards}\n\n"
+                "写作要求：每个节点都必须兑现主动动作、外界反馈、信息差变化和钩子变化；"
+                "禁止只按大纲泛写，禁止纯氛围、纯设定、纯内心凑字。"
+            )
+        except Exception as exc:
+            logger.error("基础章节生成无法完成单元剧扩写，拒绝回退旧提示词: %s", exc)
+            raise
+
+        user_message = f"请根据以下大纲创作第{chapter_number}章：\n\n{outline}{expanded_outline_block}"
 
         return Prompt(system=system_message, user=user_message)

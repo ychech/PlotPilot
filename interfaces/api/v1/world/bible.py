@@ -405,6 +405,18 @@ async def _sse_bible_generator(
                     logger.error("Failed to stream dimension %s: %s", dim_key, e)
                     dim_data = {}
 
+                dim_data = bible_generator._normalize_dimension_for_storage(dim_key, dim_data)
+                try:
+                    dim_data = await bible_generator._complete_dimension_storage_fields(
+                        premise,
+                        novel.target_chapters,
+                        dim_key,
+                        dim_data,
+                        accumulated_wb,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to complete storage fields for dimension %s: %s", dim_key, e)
+
                 if dim_data:
                     accumulated_wb[dim_key] = dim_data
                     # 逐字段推送完整的字段值（前端更新最终状态）

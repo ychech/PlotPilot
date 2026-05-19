@@ -105,6 +105,20 @@
           <span>{{ writingStatus.context_tokens ?? 0 }}</span>
           <span class="detail-label">节拍焦点</span>
           <span>{{ writingStatus.beat_focus || '—' }}</span>
+          <span class="detail-label">节点卡</span>
+          <span>{{ writingStatus.current_node_card_title || '—' }}</span>
+          <span class="detail-label">节点功能</span>
+          <span>{{ writingStatus.current_node_card_function || '—' }}</span>
+          <span class="detail-label">主动动作</span>
+          <span>{{ writingStatus.current_node_card_action || '—' }}</span>
+          <span class="detail-label">外界反馈</span>
+          <span>{{ writingStatus.current_node_card_feedback || '—' }}</span>
+          <span class="detail-label">信息差</span>
+          <span>{{ writingStatus.current_node_card_info_delta || '—' }}</span>
+          <span class="detail-label">节点验收</span>
+          <span>{{ nodeValidationLine || '—' }}</span>
+          <span class="detail-label">单元剧验收</span>
+          <span>{{ unitValidationLine || '—' }}</span>
           <span class="detail-label">最近智能截断</span>
           <span>{{ lastTruncateLine || '无' }}</span>
         </div>
@@ -228,6 +242,26 @@ const lastTruncateLine = computed(() => {
     modeRaw === 'hard' ? '硬截断' : modeRaw === 'smart' ? '智能截断' : ''
   const modeSeg = modeLabel ? ` · ${modeLabel}` : ''
   return `节拍 ${bi}/${tb} · ${from}→${to} 字 · 硬上限 ${cap} · 相位 ${ph}${modeSeg}`
+})
+
+const nodeValidationLine = computed(() => {
+  const raw = writingStatus.value?.last_node_validation
+  if (!raw || typeof raw !== 'object') return ''
+  const o = raw as Record<string, unknown>
+  const passed = o.passed === true ? '通过' : '未通过'
+  const score = o.score != null ? ` · ${Number(o.score).toFixed(2)}` : ''
+  const summary = o.summary ? ` · ${String(o.summary)}` : ''
+  return `${passed}${score}${summary}`
+})
+
+const unitValidationLine = computed(() => {
+  const raw = writingStatus.value?.last_unit_drama_validation
+  if (!raw || typeof raw !== 'object') return ''
+  const o = raw as Record<string, unknown>
+  const passed = o.passed === true ? '通过' : '未通过'
+  const score = o.score != null ? ` · ${Number(o.score).toFixed(2)}` : ''
+  const summary = o.summary ? ` · ${String(o.summary)}` : ''
+  return `${passed}${score}${summary}`
 })
 
 async function fetchWritingTelemetry() {
