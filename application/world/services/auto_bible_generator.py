@@ -9,6 +9,7 @@ from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
 from application.world.services.bible_service import BibleService
 from application.world.services.worldbuilding_service import WorldbuildingService
+from domain.bible.entities.world_setting import WorldSetting
 from application.world.worldbuilding_merge import (
     bible_dto_world_settings_to_slices,
     merge_worldbuilding_table_and_bible_slices,
@@ -911,25 +912,45 @@ JSON 格式（不要有其他文字）：
         # 2. 同时保存到Bible的world_settings（用于前端显示）
         try:
             logger.debug("Saving worldbuilding to Bible.world_settings")
-            bible = self.bible_service.get_bible_by_novel(novel_id)
-            if not bible:
+            bible_dto = self.bible_service.get_bible_by_novel(novel_id)
+            if not bible_dto:
                 bible_id = f"{novel_id}-bible"
                 self.bible_service.create_bible(bible_id, novel_id)
+            bible = self.bible_service.bible_repository.get_by_novel_id(NovelId(novel_id))
+            if bible is None:
+                raise EntityNotFoundError("Bible", f"for novel {novel_id}")
 
-            # 将5维度数据转换为world_setting条目
-            # WorldSetting的type只能是'rule', 'location', 'item'，所以统一使用'rule'
             import uuid
-            for dimension_name, dimension_data in worldbuilding_data.items():
-                if isinstance(dimension_data, dict):
-                    for key, value in dimension_data.items():
-                        setting_id = f"{novel_id}-ws-{uuid.uuid4().hex[:8]}"
-                        self.bible_service.add_world_setting(
-                            novel_id=novel_id,
-                            setting_id=setting_id,
-                            name=f"{dimension_name}.{key}",
-                            description=value,
-                            setting_type="rule"  # 统一使用'rule'类型
-                        )
+            existing_names = {
+                getattr(setting, "name", "")
+                for setting in bible.world_settings
+                if getattr(setting, "name", "")
+            }
+            if isinstance(worldbuilding_data, dict):
+                for dimension_name, dimension_data in worldbuilding_data.items():
+                    if isinstance(dimension_data, dict):
+                        for key, value in dimension_data.items():
+                            setting_name = f"{dimension_name}.{key}"
+                            if setting_name in existing_names:
+                                old = next(
+                                    (s for s in bible.world_settings if s.name == setting_name),
+                                    None,
+                                )
+                                if old is not None:
+                                    try:
+                                        bible.remove_world_setting(old.id)
+                                    except Exception:
+                                        pass
+                            setting_id = f"{novel_id}-ws-{uuid.uuid4().hex[:8]}"
+                            bible.add_world_setting(
+                                WorldSetting(
+                                    id=setting_id,
+                                    name=setting_name,
+                                    description=value,
+                                    setting_type="rule",
+                                )
+                            )
+            self.bible_service.bible_repository.save(bible)
             logger.info("Worldbuilding saved to Bible.world_settings successfully")
         except Exception as e:
             logger.error(f"Failed to save to Bible.world_settings: {e}")
@@ -1023,7 +1044,35 @@ JSON 格式：
 }}
 ```"""
 
-        return await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
+        raw = await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
+        if not isinstance(raw, dict):
+            return {"style": "", "worldbuilding": {}}
+
+        style = raw.get("style") or ""
+        raw_worldbuilding = raw.get("worldbuilding") or {}
+        worldbuilding: Dict[str, Any] = {}
+
+        existing_worldbuilding: Dict[str, Any] = {}
+        for dim_key in self._DIMENSION_DEFS.keys():
+            normalized = self._normalize_dimension_for_storage(
+                dim_key,
+                raw_worldbuilding.get(dim_key),
+            )
+            completed = await self._complete_dimension_storage_fields(
+                premise,
+                target_chapters,
+                dim_key,
+                normalized,
+                existing_worldbuilding,
+            )
+
+            worldbuilding[dim_key] = completed
+            existing_worldbuilding[dim_key] = completed
+
+        return {
+            "style": style.strip() if isinstance(style, str) else str(style),
+            "worldbuilding": worldbuilding,
+        }
 
     # ── 逐维度流式生成（SSE专用） ──────────────────────────────────────
 
@@ -1059,8 +1108,6 @@ JSON 格式：
                 "power_system": "力量体系/科技树的描述",
                 "physics_rules": "物理规律的特殊之处",
                 "magic_tech": "魔法或科技的运作机制",
-                "cost_and_limitation": "力量使用的代价与限制（修炼消耗、越级代价、禁忌代价）",
-                "resource_scarcity": "稀缺资源及其分配（硬通货、垄断情况）",
             },
         },
         "geography": {
@@ -1070,9 +1117,6 @@ JSON 格式：
                 "climate": "气候特点与环境",
                 "resources": "自然资源分布",
                 "ecology": "生态系统与生物链",
-                "forbidden_zones": "禁区/危险区域",
-                "urban_core": "核心城市/聚居地",
-                "hidden_realms": "秘境/隐藏空间",
             },
         },
         "society": {
@@ -1081,9 +1125,6 @@ JSON 格式：
                 "politics": "政治体制与权力架构",
                 "economy": "经济模式与贸易",
                 "class_system": "阶级/等级系统",
-                "power_structure": "明暗权力结构（明面与暗面的统治体系）",
-                "oppression_mechanism": "压迫/控制机制（强者如何压制弱者）",
-                "class_division": "阶层划分与流动壁垒",
             },
         },
         "culture": {
@@ -1092,8 +1133,6 @@ JSON 格式：
                 "history": "关键历史事件与时代背景",
                 "religion": "宗教信仰体系",
                 "taboos": "文化禁忌与违逆后果",
-                "worship": "崇拜对象与祭祀仪式",
-                "oaths_and_curses": "誓言体系与诅咒",
             },
         },
         "daily_life": {
@@ -1102,13 +1141,74 @@ JSON 格式：
                 "food_clothing": "衣食住行的日常细节",
                 "language_slang": "俚语、口音与方言",
                 "entertainment": "娱乐方式与消遣",
-                "survival_tactics": "底层/弱者的生存策略",
-                "market_reality": "市场/交易的真实状况",
-                "food_and_drink": "饮食文化与特色食物",
-                "slang_and_profanity": "粗话、黑话与市井语言",
             },
         },
     }
+
+    def _normalize_dimension_for_storage(self, dim_key: str, dim_data: Any) -> Dict[str, str]:
+        """只保留可入库标准字段；扩展字段留给 Bible.world_settings。"""
+        dim_def = self._DIMENSION_DEFS.get(dim_key)
+        if not dim_def or not isinstance(dim_data, dict):
+            return {}
+
+        allowed = set(dim_def["fields"].keys())
+        normalized: Dict[str, str] = {}
+        rejected: list[str] = []
+        for key, value in dim_data.items():
+            if key not in allowed:
+                rejected.append(str(key))
+                continue
+            if isinstance(value, str):
+                text = value.strip()
+            elif isinstance(value, (list, dict)):
+                text = json.dumps(value, ensure_ascii=False)
+            else:
+                text = str(value).strip() if value is not None else ""
+            if text:
+                normalized[key] = text
+
+        if rejected:
+            logger.warning(
+                "Worldbuilding dimension %s ignored non-storage fields: %s",
+                dim_key,
+                rejected,
+            )
+        return normalized
+
+    async def _complete_dimension_storage_fields(
+        self,
+        premise: str,
+        target_chapters: int,
+        dim_key: str,
+        dim_data: Dict[str, str],
+        existing_worldbuilding: Dict[str, Any] | None = None,
+    ) -> Dict[str, str]:
+        """补齐当前维度的关键落库字段。"""
+        dim_def = self._DIMENSION_DEFS.get(dim_key)
+        if not dim_def:
+            return dim_data
+
+        completed = dict(dim_data)
+        missing = [
+            field_key
+            for field_key in dim_def["fields"]
+            if not str(completed.get(field_key) or "").strip()
+        ]
+        if missing:
+            logger.warning("Worldbuilding dimension %s missing storage fields: %s", dim_key, missing)
+
+        for field_key in missing:
+            generated = await self._generate_single_field(
+                premise,
+                target_chapters,
+                dim_key,
+                field_key,
+                existing_worldbuilding,
+                completed,
+            )
+            if generated:
+                completed[field_key] = generated
+        return completed
 
     async def _generate_single_dimension(
         self,
@@ -1195,7 +1295,7 @@ JSON 格式：
                 config = GenerationConfig(max_tokens=4096, temperature=0.7)
                 result_raw = await self.llm_service.generate(prompt, config)
                 raw_text = result_raw.content if hasattr(result_raw, "content") else str(result_raw)
-                result = _extract_json_object(raw_text)
+                result = _parse_llm_json_to_dict(_sanitize_llm_json_output(raw_text))
                 if not isinstance(result, dict):
                     raise ValueError("LLM returned non-dict")
             else:
@@ -1204,15 +1304,15 @@ JSON 格式：
             if not isinstance(result, dict):
                 logger.warning("Dimension %s LLM returned non-dict: %s", dim_key, type(result))
                 return {}
-            # 标准化：只保留已定义的字段，但也不丢弃 LLM 生成的有效额外字段
-            normalized = {}
-            for k, v in result.items():
-                if isinstance(v, str) and v.strip():
-                    normalized[k] = v.strip()
-                elif isinstance(v, (list, dict)):
-                    # LLM 偶尔返回嵌套结构，扁平化处理
-                    normalized[k] = str(v)
-            return normalized
+            normalized = self._normalize_dimension_for_storage(dim_key, result)
+            completed = await self._complete_dimension_storage_fields(
+                premise,
+                target_chapters,
+                dim_key,
+                normalized,
+                existing_worldbuilding,
+            )
+            return completed
         except Exception as e:
             logger.error("Failed to generate dimension %s: %s", dim_key, e)
             return {}
@@ -1738,7 +1838,7 @@ JSON 格式：
                 logger.error(f"Failed to parse JSON (even after repair): {e2}")
                 logger.error(f"Raw content (first 1000 chars): {content[:1000]}")
                 logger.error(f"Raw content (last 500 chars): {content[-500:]}")
-                raise  # 向上抛出，让重试逻辑处理
+                return {}
 
     async def _call_llm_and_parse_with_retry(
         self,
@@ -1944,4 +2044,3 @@ JSON 格式：
                         logger.info(f"Created triple: {loc_data['name']} -{predicate}-> {target_name}")
                     except Exception as e:
                         logger.error(f"Failed to save triple: {e}")
-
