@@ -1091,9 +1091,9 @@ async function checkSseAvailable(novelId: string): Promise<boolean> {
   if (sseAvailable.value !== null) return sseAvailable.value
   try {
     const url = resolveHttpUrl(`/api/v1/bible/novels/${novelId}/generate-stream?stage=worldbuilding`)
-    // 用 HEAD 请求快速检测（FastAPI 对 HEAD 自动返回 GET 的 headers）
-    const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) })
-    const ok = res.ok || res.status === 405  // 405 = Method Not Allowed 也说明路由存在
+    // 用 GET 请求检测（Starlette 1.0 移除了 HEAD 自动处理，改用 GET）
+    const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(5000) })
+    const ok = res.ok
     sseAvailable.value = ok
     return ok
   } catch {
@@ -1655,10 +1655,19 @@ async function detectWizardProgress(): Promise<number> {
     styleText.value = styleConventionFromBible(bible)
 
     // ── 判断后端是否已有数据（用于决定步骤内部显示"生成中"还是"可编辑预览"） ──
-    const hasWorldbuilding = bible.world_settings?.length > 0 || Object.values(worldbuildingData.value).some(dim => Object.keys(dim).length > 0)
+    const hasWorldbuilding = bible.world_settings?.length > 0 || Object.values(worldbuildingData.value).some(dim => Object.values(dim).some(v => String(v).trim().length > 0))
     const hasStyle = styleConventionFromBible(bible).length > 0
     const hasCharacters = (bible.characters?.length ?? 0) > 0
     const hasLocations = (bible.locations?.length ?? 0) > 0
+
+    console.log('[Wizard] detectWizardProgress data:', {
+      novelId: props.novelId,
+      hasWorldbuilding, hasStyle, hasCharacters, hasLocations,
+      wsCount: bible.world_settings?.length ?? 0,
+      charCount: bible.characters?.length ?? 0,
+      locCount: bible.locations?.length ?? 0,
+      wbKeys: Object.values(worldbuildingData.value).map(dim => Object.keys(dim).length),
+    })
 
     // 有数据就标记为"已生成"（步骤内展示可编辑预览），没有则展示"生成中"或初始状态
     if (hasWorldbuilding || hasStyle) {
@@ -1693,31 +1702,62 @@ async function detectWizardProgress(): Promise<number> {
     const cached = readWizardUiCache(props.novelId)
     const cachedLastStep = cached?.lastStep
 
+    console.log('[Wizard] detectWizardProgress cache:', { cachedLastStep, wizardCompleted: cached?.wizardCompleted })
+
     if (cachedLastStep && cachedLastStep >= 1 && !cached?.wizardCompleted) {
-      // 有缓存且未完成 → 回到上次停下的步骤（不跳过）
+      console.log('[Wizard] → cache branch, validating prerequisites for step', cachedLastStep)
+      // 有缓存 → 验证前置数据是否仍存在，缺失则回退到最早缺失的步骤
+      if (cachedLastStep >= 2 && !hasWorldbuilding && !hasStyle) {
+        console.log('[Wizard] → cache: worldbuilding missing, fallback to 1')
+        resumedFromStep.value = 0
+        return 1
+      }
+      if (cachedLastStep >= 3 && !hasCharacters) {
+        console.log('[Wizard] → cache: characters missing, fallback to 2')
+        resumedFromStep.value = 2
+        return 2
+      }
+      if (cachedLastStep >= 4 && !hasLocations) {
+        console.log('[Wizard] → cache: locations missing, fallback to 3')
+        resumedFromStep.value = 3
+        return 3
+      }
+      if (cachedLastStep >= 5 && !hasMainPlot) {
+        console.log('[Wizard] → cache: main plot missing, fallback to 4')
+        resumedFromStep.value = 4
+        return 4
+      }
+      // 前置数据完整 → 恢复到缓存步骤
+      console.log('[Wizard] → cache: prerequisites ok, resume at', cachedLastStep)
       resumedFromStep.value = cachedLastStep
       return cachedLastStep
     }
 
     // 没有缓存（新创建的书），按后端数据推断，但不跳过 —— 回到第一个"还没确认"的步骤
+    console.log('[Wizard] → no-cache branch')
     if (!hasWorldbuilding && !hasStyle) {
+      console.log('[Wizard] → no worldbuilding/style, return 1')
       resumedFromStep.value = 0
       return 1
     }
     if (!hasCharacters) {
+      console.log('[Wizard] → no characters, return 2')
       resumedFromStep.value = 2
       return 2
     }
     if (!hasLocations) {
+      console.log('[Wizard] → no locations, return 3')
       resumedFromStep.value = 3
       return 3
     }
     if (!hasMainPlot) {
+      console.log('[Wizard] → no main plot, return 4')
       resumedFromStep.value = 4
       return 4
     }
 
     resumedFromStep.value = 5
+    console.log('[Wizard] → no-cache branch, all steps complete, return 5')
     return 5
   } catch (err) {
     console.warn('[NovelSetupGuide] detectWizardProgress failed:', err)

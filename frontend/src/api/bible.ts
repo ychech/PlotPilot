@@ -13,7 +13,7 @@ export interface CharacterDTO {
   name: string
   description: string
   relationships: BibleRelationshipEntry[]
-  /** AI 生成时的角色定位（主角/配角等）— 后端不持久化此字段，仅从 description 解析 */
+  /** 角色定位（主角/配角/反派等），独立持久化 */
   role?: string
   mental_state?: string
   verbal_tic?: string

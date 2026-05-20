@@ -1,0 +1,50 @@
+name: 精密宏观规划
+category: planning
+source: application/blueprint/services/continuous_planning_service.py::_build_precise_macro_prompt()
+description: 精密模式：在用户指定部/卷/幕网格内填充标题、描述和幕级字段。
+builtin: true
+tags:
+- 规划
+- 宏观规划
+- 精密模式
+- JSON输出
+output_format: json
+variables:
+- name: target_chapters
+  desc: 目标章节数。
+  type: number
+  required: true
+- name: parts
+  desc: 固定部数。
+  type: number
+  required: true
+- name: volumes_per_part
+  desc: 每部固定卷数。
+  type: number
+  required: true
+- name: acts_per_volume
+  desc: 每卷固定幕数。
+  type: number
+  required: true
+- name: total_acts
+  desc: 总幕数。
+  type: number
+  required: true
+- name: avg_chapters_per_act
+  desc: 平均每幕章节数。
+  type: number
+  required: true
+- name: pacing_guide
+  desc: 由代码根据目标章节数和部数计算出的章数节奏说明。
+  type: string
+  required: true
+- name: worldview_context
+  desc: Bible 世界观、人物、关系、地点、时间线整理后的上下文。
+  type: string
+  required: true
+- name: skeleton_block
+  desc: 固定结构骨架，包含每个部/卷/幕的 node_id。
+  type: string
+  required: true
+id: planning-macro-precise
+sort_order: 21

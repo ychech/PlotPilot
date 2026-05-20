@@ -146,6 +146,13 @@ export const novelApi = {
   }) => apiClient.post<NovelDTO>('/novels', data) as Promise<NovelDTO>,
 
   /**
+   * Generate title from premise using AI
+   * POST /api/v1/novels/generate-title
+   */
+  generateTitle: (data: { premise: string }) =>
+    apiClient.post<{ title: string }>('/novels/generate-title', data) as Promise<{ title: string }>,
+
+  /**
    * Delete a novel
    * DELETE /api/v1/novels/{novelId}
    */

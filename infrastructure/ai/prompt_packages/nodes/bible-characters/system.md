@@ -7,6 +7,39 @@
 2. 骨：内心不可示人的隐秘恐惧（Ghost）和渴望达成的执念。
 3. 网：设计一个天生的宿敌，或者相爱相杀的羁绊。
 
+## 输出 JSON 格式要求
+
+每个角色必须包含以下字段。description 必须是单行文本。
+
+```json
+{
+  "characters": [
+    {
+      "name": "人物名",
+      "role": "主角/配角/对手/导师/恋人/家人",
+      "description": "性格、背景、目标、特点，所有内容在一行内，用逗号分隔",
+      "public_profile": "公开形象：外界看ta是什么样的——社交面具、职业身份、外在性格标签（一行内）",
+      "hidden_profile": "隐秘内核：不为人知的秘密、创伤、伪装、双重身份（一行内）",
+      "mental_state": "NORMAL/ANXIOUS/DEPRESSED/RESTLESS/OBSESSIVE/GUILT_RIDDEN/VENGEFUL/HOPEFUL/BROKEN/DETERMINED",
+      "mental_state_reason": "产生当前心理状态的原因，一行描述",
+      "verbal_tic": "口头禅或说话习惯，如“喜欢反问”“每句话结尾带'呢'”“遇到压力就结巴”",
+      "idle_behavior": "下意识小动作或待机姿态，如“习惯摸鼻尖”“紧张时整理袖口”“站着时喜欢重心换脚”",
+      "core_belief": "核心信念/价值选择立场，如“力量即正义”“弱者的善意最可贵”",
+      "voice_profile": {"pitch": "中偏低/偏高/低沉", "speed": "快/中速/慢", "tone": "冷淡/热情/慵懒/爽朗/刻薄/温和", "signature": "标志性语言特征"},
+      "relationships": [
+        {
+          "target": "目标人物名",
+          "relation": "关系类型（师徒/敌对/合作/亲属/暧昧等）",
+          "description": "关系的详细描述"
+        }
+      ]
+    }
+  ]
+}
+```
+
+voice_profile 请根据角色性格真实赋予，不要为所有角色填相同的值。每个角色的声线要有辨识度。
+
 ## 中文姓名（硬性）
 
 - **禁用俗套大姓**：李、王、张、刘、陈、杨、林、赵、周、吴 —— 不得作为任何主要角色的姓氏（含名字首字）。

@@ -4,6 +4,7 @@
 """
 import asyncio
 import logging
+import re
 from typing import Tuple, Dict, Any, AsyncIterator, Optional, List, Callable, Awaitable
 from application.engine.services.context_builder import ContextBuilder
 from application.analyst.services.state_extractor import StateExtractor
@@ -18,7 +19,7 @@ from domain.novel.services.storyline_manager import StorylineManager
 from domain.novel.repositories.plot_arc_repository import PlotArcRepository
 from domain.bible.repositories.bible_repository import BibleRepository
 from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepository
-from domain.novel.value_objects.consistency_report import ConsistencyReport
+from domain.novel.value_objects.consistency_report import ConsistencyReport, Severity
 from domain.novel.value_objects.chapter_state import ChapterState
 from domain.novel.value_objects.consistency_context import ConsistencyContext
 from domain.novel.value_objects.novel_id import NovelId
@@ -90,38 +91,56 @@ def _safe_format(template: str, variables: Dict[str, Any]) -> str:
 
 
 # CPMS: 主工作流提示词节点 key（与 prompt_packages 中节点 id 一致）
-from infrastructure.ai.prompt_keys import CHAPTER_GENERATION_MAIN as _WORKFLOW_CHAPTER_GEN_NODE_KEY
+from infrastructure.ai.prompt_keys import (
+    CHAPTER_CONTEXT_ALIGNMENT as _CHAPTER_CONTEXT_ALIGNMENT_NODE_KEY,
+    CHAPTER_GENERATION_MAIN as _WORKFLOW_CHAPTER_GEN_NODE_KEY,
+    CHAPTER_QUALITY_REPAIR as _CHAPTER_QUALITY_REPAIR_NODE_KEY,
+)
+
+_CONTEXT_PRIORITY_ORDER = "FACT_LOCK > Bible 正典 > 故事线/里程碑 > 最近章节正文 > 向量召回 > 本章大纲措辞"
 
 # 硬编码回退：system 模板框架（仅在 PromptRegistry 不可用时使用）
 _FALLBACK_SYSTEM_TEMPLATE = (
-    "你是一位专业的网络小说作家。根据以下上下文撰写章节内容。\n"
+    "你是一位专业的网络小说作家。默认使用第三人称限制视角，贴近 POV 角色的感知讲故事；"
+    "除非文风公约或本章大纲明确要求第一人称，否则不要用“我/我们/我的”作为叙述人称。"
+    "用贴合作品题材和人物处境的语言讲故事；叙述要平实、有画面，不要写成说明书。\n"
     "{theme_persona}{theme_rules}\n"
     "{planning_section}{voice_block}{context}\n\n"
     "{fact_lock}\n"
     "{shuangwen_directive}"
     "{prose_discipline}"
-    "写作要求：\n"
-    "1. 必须有多个人物互动（至少2-3个角色出场）\n"
-    "2. 必须有对话（不能只有独白和叙述）\n"
-    "3. 必须有冲突或张力（人物之间的矛盾、目标阻碍、悬念等）\n"
-    "4. 保持人物性格一致\n"
-    "5. 推进情节发展\n"
-    "6. 使用生动的场景描写和细节\n"
-    "{length_rule}\n"
-    "8. 用中文写作，使用第三人称叙事{beat_extra}\n"
+    "━━━ 核心写作法则 ━━━\n"
+    "1. 信息密度：每段（空行分段）必须含具体动作/有信息量的对白/发现或决定/可见位移之一，禁止连续两段纯写景\n"
+    "2. 感官优先：感官细节→动作变化→对话内容，禁止直接写情绪标签（不写'他感到愤怒'，写他攥紧了什么、呼吸变了）\n"
+    "3. 节奏控制：快节奏短句但同一动作链须合并为一段。全章独段比例≤15%，仅限冲突引爆/重大揭露/情绪暴击\n"
+    "4. 章节开头：前三句话内须与前章结尾产生连接点。场景转换须用过渡句，禁止空行跳转\n"
+    "5. 冲突慢写：对峙/摊牌/关键台词时拉长瞬间——姿态变化、环境反应、沉默中的小动作\n"
+    "6. 对话弦外之音：每句台词要么推进关系、要么暴露性格、要么暗藏机锋。禁止角色直抒胸臆\n"
+    "7. 环境是心理滤镜：写环境就是在写角色的内心。但景物必须绑在POV处境上，不能只有氛围词\n"
+    "8. 第三人称限制视角：只写POV角色能感知到的东西。禁止上帝视角分析\n"
+    "9. 完整章节收束：本章必须完成一个可指认的阶段性结果。可以留下下一章钩子，但不能停在半截句子、半截对白、半截动作或刚出现的新事件上\n"
+    "章节任务闭环：任何题材都必须满足“事件发生→角色应对→结果落地”。结果可以是信息被确认、目标暂时达成或失败、代价显现、角色做出选择、关系发生变化、危机被解决或升级。不要把新东西刚出现、有人刚开口、门刚被推开、提示刚亮起、异象刚发生当作章节结尾\n"
+    "10. {length_rule}\n"
+    "11. 杀死AI腔：禁止'像一把刀'等套路比喻、'空气凝固了'等氛围套路、'不是…而是…'等纠正式对照、'一切才刚刚开始'等结尾总结句。结尾用动作或画面收束{beat_extra}\n"
+    "12. 遵从大纲核心事件顺序与角色关系，可在骨架之上填充血肉但不能替换骨架\n"
     "{format_rules}"
 )
 
 # 硬编码回退：user 模板框架
 _FALLBACK_USER_TEMPLATE = (
     "请根据以下大纲撰写本章内容：\n\n{outline}\n\n"
+    "━━ 叙事语调提醒 ━━\n"
+    "系统提示中给出了【风格约束】——那是本章的叙述腔调。让每个句子的节奏、用词、氛围都贴合那个腔调。\n\n"
     "关键要求（必须遵守）：\n"
     "- 至少2-3个角色出场并互动\n"
-    "- 必须包含对话场景（不少于3段对话）\n"
+    "- 必须包含对话场景（不少于3段对话），对话要有弦外之音\n"
     "- 必须有明确的冲突或戏剧张力\n"
     "- 场景要具体生动，不要空泛叙述\n"
     "- 推进主线情节，不要原地踏步\n"
-    "- 结尾要有悬念或转折\n\n"
+    "- 结尾要先完成本章阶段性结果，再留下悬念或转折；不能用半截对白/半截动作冒充钩子\n"
+    "- 默认第三人称限制视角；除非文风公约或大纲明确要求第一人称，不要用“我/我们/我的”叙述\n"
+    "- 不管本章是什么题材，都要写到本章结果：信息确认、目标成败、代价显现、角色选择、关系变化，或危机解决/升级\n"
+    "- 情绪通过动作和感官细节传递，不写'他感到愤怒'\n\n"
     "{beat_section}"
 )
 
@@ -129,6 +148,51 @@ _FALLBACK_USER_TEMPLATE = (
 # 段名与语义对齐，避免「SMART RETRIEVAL」贴在近期正文等历史误标
 CHAPTER_CONTEXT_LAYER2_HEADER = "RECENT CHAPTERS"  # T2 近期章节正文
 CHAPTER_CONTEXT_LAYER3_HEADER = "VECTOR RECALL"  # T3 向量召回
+
+
+_FALLBACK_CONTEXT_ALIGNMENT_PROTOCOL = (
+    "【上下文对齐协议】\n"
+    "1. 写作前先在心里核对：本章大纲、RECENT CHAPTERS、VECTOR RECALL、Bible、FACT_LOCK、故事线/里程碑是否互相冲突。\n"
+    f"2. 若局部材料冲突，优先级为 {_CONTEXT_PRIORITY_ORDER}。\n"
+    "3. 正文必须承接最近章节已经发生的事件、角色状态、关系变化和未完成动作；不得重置关系、重复揭露已揭露线索、让已解决冲突重新当作新发现。\n"
+    "4. 若大纲包含旧名、占位名、旧地点或与 Bible 不一致的表述，正文只采用正典信息，同时保留大纲要求的核心事件。\n"
+    "5. 不要把上下文解释给读者听；把对齐结果落实为人物行动、对白、场景调度和因果推进。"
+)
+
+_FALLBACK_CHARACTER_CANON_CONTRACT = (
+    "【角色正典锁】\n"
+    "以下角色信息来自 Bible，是正文唯一正典。写作时必须保持姓名、身份、职业/能力、关系、心理状态、口癖、习惯动作、"
+    "核心信念、禁忌和伤痕一致。\n"
+    "{character_canon}\n\n"
+    "执行规则：\n"
+    "1. 不得把 A 角色的能力、经历、口癖、关系或心理状态写到 B 身上。\n"
+    "2. 隐藏信息未到 reveal_chapter 前，只能作为叙述者已知背景，不得让角色公开说出或让旁人无因得知。\n"
+    "3. 角色关系若要变化，必须通过本章可见事件推进，不得开篇直接重置。\n"
+    "4. 若大纲与角色正典冲突，保留大纲的事件意图，但正文按角色正典改写。"
+)
+
+_FALLBACK_QUALITY_REPAIR_SYSTEM = (
+    "你是小说终稿修订编辑。任务是基于同一生成上下文修复章节，而不是另写新剧情。\n"
+    "硬规则：\n"
+    "1. 严格对齐【上下文】、Bible、FACT_LOCK、故事线、章节大纲，不得新增与上下文冲突的角色、地点、关系或事件。\n"
+    "2. 保留原章的核心事件顺序与已经成立的因果，只修正质量问题、补足缺漏、清除 AI 腔。\n"
+    "3. 输出只能是修订后的章节正文，不要解释，不要列问题，不要写标题。\n"
+    "4. 若原文局部可用，沿用其有效情节；若某段违反设定或 AI 腔明显，重写该段。\n"
+    "5. 用动作、对白、感官细节和具体选择推进；避免总结、说教、模板化比喻。\n"
+    "6. 若质量反馈指出章节不完整，必须补完本章阶段性结果；可以保留下一章钩子，但不能停在半截句子、半截对白、半截动作或刚出现的新事件上。\n"
+    "7. 默认第三人称限制视角；除非上下文或大纲明确要求第一人称，否则把“我/我们/我的”叙述改为角色名或“他/她”的贴身限制视角。\n"
+    "8. 若原文停在任何新事件刚出现的位置，例如新物件、新声音、新人物、新信息、新威胁、新提示、新异象刚出现，必须继续补到本章结果：信息确认、目标成败、代价显现、角色选择、关系改变、危机解决或危机升级。"
+)
+
+_FALLBACK_QUALITY_REPAIR_USER = (
+    "【上下文】\n{context}\n\n"
+    "【角色正典锁】\n{character_canon_contract}\n\n"
+    "【本章大纲】\n{outline}\n\n"
+    "【质量门禁反馈】\n{quality_feedback}\n\n"
+    "【字数指引】\n目标约 {target_words} 字，至少 {min_words} 字。\n\n"
+    "【待修订正文】\n{original_content}\n\n"
+    "请输出修订后的完整章节正文："
+)
 
 
 def _build_dynamic_coherence_rules(anchor) -> str:
@@ -298,6 +362,7 @@ class AutoNovelGenerationWorkflow:
         # V6 运行时上下文缓存（供 _build_prompt 使用）
         self._current_novel_id: str = ""
         self._current_chapter_number: int = 0
+        self._current_character_canon_contract: str = ""
         
         # 强制初始化 StateExtractor（如果未提供）
         if state_extractor is None:
@@ -439,6 +504,7 @@ class AutoNovelGenerationWorkflow:
             voice_anchors = self.context_builder.build_voice_anchor_system_section(novel_id)
         except Exception as e:
             logger.warning("voice_anchor section skipped: %s", e)
+        character_canon_contract = self._build_character_canon_contract(novel_id, chapter_number)
         return {
             "storyline_context": storyline_context,
             "plot_tension": plot_tension,
@@ -446,6 +512,7 @@ class AutoNovelGenerationWorkflow:
             "context_tokens": context_tokens,
             "style_summary": style_summary,
             "voice_anchors": voice_anchors,
+            "character_canon_contract": character_canon_contract,
         }
 
     def _resolve_target_chapter_words(self, novel_id: str) -> int:
@@ -476,6 +543,13 @@ class AutoNovelGenerationWorkflow:
                 e,
             )
         return stripped
+
+    def _chapter_generation_config(self, target_words: int, *, temperature: float = 1.0) -> GenerationConfig:
+        """按章节目标字数给足输出预算，避免正文被模型 max_tokens 截断成半章。"""
+        tw = int(target_words or 2500)
+        # 中文正文约 1.2-1.8 token/字，保守给到 2.4x，并留出结尾余量。
+        max_tokens = max(4096, min(24000, int(tw * 2.4) + 1200))
+        return GenerationConfig(max_tokens=max_tokens, temperature=temperature)
 
     def build_fallback_chapter_bundle(
         self,
@@ -523,6 +597,7 @@ class AutoNovelGenerationWorkflow:
             voice_anchors = self.context_builder.build_voice_anchor_system_section(novel_id)
         except Exception as e:
             logger.warning("fallback voice_anchors skipped: %s", e)
+        character_canon_contract = self._build_character_canon_contract(novel_id, chapter_number)
 
         return {
             "storyline_context": storyline_context,
@@ -531,6 +606,7 @@ class AutoNovelGenerationWorkflow:
             "context_tokens": context_tokens,
             "style_summary": style_summary,
             "voice_anchors": voice_anchors,
+            "character_canon_contract": character_canon_contract,
         }
 
     async def post_process_generated_chapter(
@@ -540,12 +616,46 @@ class AutoNovelGenerationWorkflow:
         outline: str,
         content: str,
         scene_director: Optional[SceneDirectorAnalysis] = None,
+        persist_updates: bool = True,
     ) -> Dict[str, Any]:
         """生成正文后的统一后处理：俗套扫描、状态提取、一致性、冲突批注、StateUpdater、MemoryEngine回写。"""
         style_warnings = self._scan_cliches(content)
         chapter_state = await self._extract_chapter_state(content, chapter_number)
         consistency_report = self._check_consistency(chapter_state, novel_id)
         ghost_annotations = self._detect_conflicts(novel_id, chapter_number, outline, scene_director)
+        ghost_annotations.extend(self._detect_character_canon_drift(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            content=content,
+        ))
+        memory_delta = {}
+        if persist_updates:
+            memory_delta = await self._commit_generated_chapter_updates(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                outline=outline,
+                content=content,
+                chapter_state=chapter_state,
+            )
+
+        return {
+            "style_warnings": style_warnings,
+            "chapter_state": chapter_state,
+            "consistency_report": consistency_report,
+            "ghost_annotations": ghost_annotations,
+            "memory_delta": memory_delta,
+        }
+
+    async def _commit_generated_chapter_updates(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        outline: str,
+        content: str,
+        chapter_state: ChapterState,
+    ) -> Dict[str, Any]:
+        """只对最终采用的正文回写状态与记忆，避免失败草稿污染后续上下文。"""
         if self.state_updater:
             try:
                 self.state_updater.update_from_chapter(novel_id, chapter_number, chapter_state)
@@ -574,13 +684,767 @@ class AutoNovelGenerationWorkflow:
             except Exception as e:
                 logger.warning("MemoryEngine 章后回写失败: %s", e)
 
-        return {
-            "style_warnings": style_warnings,
-            "chapter_state": chapter_state,
-            "consistency_report": consistency_report,
-            "ghost_annotations": ghost_annotations,
-            "memory_delta": memory_delta,
+        return memory_delta
+
+    def _estimate_chinese_words(self, content: str) -> int:
+        """粗略估算正文长度，中文按非空白字符计，英文按词计。"""
+        if not content:
+            return 0
+
+        cjk_chars = re.findall(r"[\u4e00-\u9fff]", content)
+        ascii_words = re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?", content)
+        return len(cjk_chars) + len(ascii_words)
+
+    def _build_retrospective_micro_beats(
+        self,
+        content: str,
+        *,
+        target_words: int,
+    ) -> List[Dict[str, Any]]:
+        """从最终正文反推展示/回顾用 micro_beats；不参与本章正文生成。"""
+        text = (content or "").strip()
+        if not text:
+            return []
+
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text) if p.strip()]
+        sentences = [
+            s.strip()
+            for s in re.findall(r"[^。！？!?]+[。！？!?]?", text)
+            if s.strip()
+        ]
+        blocks = paragraphs if len(paragraphs) >= 4 else (sentences or paragraphs)
+        if not blocks:
+            return []
+
+        estimated_words = self._estimate_chinese_words(text)
+        desired = max(3, min(6, int(round((estimated_words or target_words or 2500) / 550))))
+        desired = max(1, min(desired, len(blocks)))
+        target_per_group = max(1, int(sum(len(b) for b in blocks) / desired))
+
+        groups: List[List[str]] = []
+        current: List[str] = []
+        current_chars = 0
+        for idx, block in enumerate(blocks):
+            remaining_blocks = len(blocks) - idx
+            remaining_groups = desired - len(groups)
+            should_close = (
+                current
+                and current_chars >= target_per_group
+                and remaining_blocks >= remaining_groups
+            )
+            if should_close:
+                groups.append(current)
+                current = []
+                current_chars = 0
+            current.append(block)
+            current_chars += len(block)
+        if current:
+            groups.append(current)
+
+        focus_by_position = ["setup", "development", "conflict", "turning_point", "resolution"]
+        beats: List[Dict[str, Any]] = []
+        for idx, group in enumerate(groups[:6]):
+            segment = "\n\n".join(group).strip()
+            if not segment:
+                continue
+            desc = self._summarize_retrospective_segment(segment)
+            if not desc:
+                continue
+            if len(groups) == 1:
+                focus = "review"
+            else:
+                pos = round(idx * (len(focus_by_position) - 1) / max(1, len(groups) - 1))
+                focus = focus_by_position[pos]
+            beats.append(
+                {
+                    "description": desc,
+                    "target_words": self._estimate_chinese_words(segment),
+                    "focus": focus,
+                    "location_id": "",
+                }
+            )
+        return beats
+
+    def _summarize_retrospective_segment(self, segment: str, *, limit: int = 96) -> str:
+        """给回顾节拍生成短描述，避免把整段正文塞进 micro_beats。"""
+        compact = re.sub(r"\s+", "", segment or "")
+        if not compact:
+            return ""
+        sentences = [
+            s.strip()
+            for s in re.findall(r"[^。！？!?]+[。！？!?]?", compact)
+            if s.strip()
+        ]
+        if not sentences:
+            return compact[:limit]
+        first = sentences[0]
+        last = sentences[-1]
+        summary = first if first == last else f"{first} -> {last}"
+        return summary[:limit]
+
+    def _build_character_canon_contract(self, novel_id: str, chapter_number: int) -> str:
+        """从 Bible 提炼本章角色正典锁，供生成与修稿共用。"""
+        if not self.bible_repository:
+            return ""
+        try:
+            bible = self.bible_repository.get_by_novel_id(NovelId(novel_id))
+        except Exception as exc:
+            logger.warning("角色正典锁构建失败 novel=%s chapter=%s: %s", novel_id, chapter_number, exc)
+            return ""
+        if not bible or not getattr(bible, "characters", None):
+            return ""
+
+        def _character_info_score(character: Any) -> int:
+            fields = [
+                "role", "description", "public_profile", "mental_state_reason",
+                "verbal_tic", "idle_behavior", "core_belief", "hidden_profile",
+            ]
+            score = 0
+            for field in fields:
+                value = (getattr(character, field, "") or "").strip()
+                score += min(len(value), 120)
+            score += 40 * len(getattr(character, "relationships", None) or [])
+            score += 40 * len(getattr(character, "moral_taboos", None) or [])
+            score += 40 * len(getattr(character, "active_wounds", None) or [])
+            return score
+
+        unique_by_name: Dict[str, Any] = {}
+        for character in bible.characters:
+            name = (getattr(character, "name", "") or "").strip()
+            if not name:
+                continue
+            existing = unique_by_name.get(name)
+            if existing is None or _character_info_score(character) > _character_info_score(existing):
+                unique_by_name[name] = character
+
+        lines: List[str] = []
+        for character in list(unique_by_name.values())[:16]:
+            name = (getattr(character, "name", "") or "").strip()
+            if not name:
+                continue
+            cid_obj = getattr(character, "character_id", None)
+            cid = getattr(cid_obj, "value", None) or str(getattr(character, "id", "") or "")
+            role = (getattr(character, "role", "") or "").strip()
+            desc = (getattr(character, "description", "") or "").strip()
+            public_profile = (getattr(character, "public_profile", "") or "").strip()
+            mental_state = (getattr(character, "mental_state", "") or "").strip()
+            mental_reason = (getattr(character, "mental_state_reason", "") or "").strip()
+            verbal_tic = (getattr(character, "verbal_tic", "") or "").strip()
+            idle_behavior = (getattr(character, "idle_behavior", "") or "").strip()
+            core_belief = (getattr(character, "core_belief", "") or "").strip()
+            moral_taboos = [str(x).strip() for x in (getattr(character, "moral_taboos", None) or []) if str(x).strip()]
+            active_wounds = []
+            for wound in getattr(character, "active_wounds", None) or []:
+                if isinstance(wound, dict):
+                    label = wound.get("name") or wound.get("summary") or wound.get("description") or wound.get("wound")
+                    if label:
+                        active_wounds.append(str(label).strip())
+                elif str(wound).strip():
+                    active_wounds.append(str(wound).strip())
+            relationships = [str(x).strip() for x in (getattr(character, "relationships", None) or []) if str(x).strip()]
+            reveal_chapter = getattr(character, "reveal_chapter", None)
+            hidden_profile = (getattr(character, "hidden_profile", "") or "").strip()
+
+            facts = [f"ID={cid}"]
+            if role:
+                facts.append(f"定位={role}")
+            if desc:
+                facts.append(f"设定={desc[:180]}")
+            if public_profile:
+                facts.append(f"公开信息={public_profile[:160]}")
+            if mental_state and mental_state != "NORMAL":
+                reason = f"（{mental_reason[:80]}）" if mental_reason else ""
+                facts.append(f"当前心理={mental_state}{reason}")
+            if verbal_tic:
+                facts.append(f"口癖/声线={verbal_tic[:80]}")
+            if idle_behavior:
+                facts.append(f"习惯动作={idle_behavior[:80]}")
+            if core_belief:
+                facts.append(f"核心信念={core_belief[:100]}")
+            if moral_taboos:
+                facts.append("禁忌=" + "、".join(moral_taboos[:4]))
+            if active_wounds:
+                facts.append("持续伤痕=" + "、".join(active_wounds[:3]))
+            if relationships:
+                facts.append("关系=" + "；".join(relationships[:4])[:180])
+            if hidden_profile:
+                if reveal_chapter and chapter_number < int(reveal_chapter):
+                    facts.append(f"隐藏信息=未到第{reveal_chapter}章不得公开揭露")
+                else:
+                    facts.append(f"隐藏信息={hidden_profile[:140]}")
+            lines.append(f"- {name}：" + "；".join(facts))
+
+        if not lines:
+            return ""
+        return _safe_format(
+            _FALLBACK_CHARACTER_CANON_CONTRACT,
+            {"character_canon": "\n".join(lines)},
+        )
+
+    def _detect_character_canon_drift(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        content: str,
+    ) -> List[GhostAnnotation]:
+        """用 Bible 做轻量正文审稿，拦截常见角色漂移。"""
+        if not self.bible_repository or not content:
+            return []
+        try:
+            bible = self.bible_repository.get_by_novel_id(NovelId(novel_id))
+        except Exception as exc:
+            logger.debug("角色正典审稿跳过 novel=%s chapter=%s: %s", novel_id, chapter_number, exc)
+            return []
+        if not bible or not getattr(bible, "characters", None):
+            return []
+
+        annotations: List[GhostAnnotation] = []
+        canon_names = [(getattr(c, "name", "") or "").strip() for c in bible.characters]
+        canon_names = [name for name in canon_names if name]
+
+        named_candidates = set(re.findall(r"[\u4e00-\u9fff]{2,4}", content))
+        # 只拦截高置信的“疑似新增姓名”：2-4 字中文名，且上下文没有该人名。
+        common_non_names = {
+            "这个", "那个", "他们", "我们", "你们", "自己", "时候", "地方", "声音", "空气", "眼神", "身影",
+            "系统", "基因", "武道", "世界", "能力", "力量", "男人", "女人", "少年", "少女", "老师", "同学",
+            "众人", "所有人", "下一刻", "与此同时", "话音刚落", "办公室", "训练场", "黑暗", "光芒",
         }
+        for candidate in sorted(named_candidates):
+            if candidate in common_non_names or candidate in canon_names:
+                continue
+            if any(candidate in name or name in candidate for name in canon_names):
+                continue
+            # 需要附近有说/问/看/走等人物动作，降低误报。
+            if not re.search(rf"{re.escape(candidate)}[^。！？\n]{{0,24}}(说|问|看|走|站|笑|点头|摇头|伸手|转身)", content):
+                continue
+            annotations.append(GhostAnnotation(
+                type="character_inconsistency",
+                severity="warning",
+                message=f"正文疑似引入 Bible 外具名角色「{candidate}」，请确认是否应改为既有角色或无名路人。",
+                entity_name=candidate,
+                expected="仅使用 Bible/大纲允许的角色",
+                actual=candidate,
+            ))
+            if len(annotations) >= 5:
+                break
+
+        for character in bible.characters:
+            name = (getattr(character, "name", "") or "").strip()
+            if not name or name not in content:
+                continue
+            hidden_profile = (getattr(character, "hidden_profile", "") or "").strip()
+            reveal_chapter = getattr(character, "reveal_chapter", None)
+            if hidden_profile and reveal_chapter and chapter_number < int(reveal_chapter):
+                hidden_terms = [
+                    term
+                    for term in re.split(r"[，。；、,;.\s]+", hidden_profile)
+                    if len(term.strip()) >= 3
+                ][:6]
+                leaked_terms = [term for term in hidden_terms if term and term in content]
+                if leaked_terms:
+                    annotations.append(GhostAnnotation(
+                        type="character_inconsistency",
+                        severity="error",
+                        message=f"「{name}」的隐藏信息疑似提前公开：{', '.join(leaked_terms[:3])}",
+                        entity_id=getattr(getattr(character, "character_id", None), "value", None),
+                        entity_name=name,
+                        expected=f"第 {reveal_chapter} 章前不得公开揭露隐藏信息",
+                        actual=", ".join(leaked_terms[:3]),
+                    ))
+
+        return annotations
+
+    def _get_canonical_character_names(self, novel_id: str) -> List[str]:
+        if not self.bible_repository:
+            return []
+        try:
+            bible = self.bible_repository.get_by_novel_id(NovelId(novel_id))
+        except Exception:
+            return []
+        if not bible or not getattr(bible, "characters", None):
+            return []
+        names: List[str] = []
+        for character in bible.characters:
+            name = (getattr(character, "name", "") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _get_canonical_protagonist_name(self, novel_id: str) -> str:
+        """尽量从 Bible/作品梗概找到正典主角名，用于清洗旧大纲占位名。"""
+        if self.bible_repository:
+            try:
+                bible = self.bible_repository.get_by_novel_id(NovelId(novel_id))
+            except Exception:
+                bible = None
+            if bible and getattr(bible, "characters", None):
+                fallback = ""
+                for character in bible.characters:
+                    name = (getattr(character, "name", "") or "").strip()
+                    if not name:
+                        continue
+                    if not fallback:
+                        fallback = name
+                    role = (getattr(character, "role", "") or "").strip()
+                    desc = (getattr(character, "description", "") or "").strip()
+                    marker = role + desc
+                    if any(key in marker for key in ("主角", "男主", "女主", "主人公", "protagonist")):
+                        return name
+                if fallback:
+                    return fallback
+
+        try:
+            novel = self.context_builder.novel_repository.get_by_id(NovelId(novel_id))
+            blob = "\n".join([
+                str(getattr(novel, "title", "") or ""),
+                str(getattr(novel, "premise", "") or ""),
+            ])
+            match = re.search(r"[，,]\s*([\u4e00-\u9fff]{2,4})(?:觉醒|获得|绑定|重生|穿越|意外)", blob)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+        return ""
+
+    def _looks_like_protagonist_alias(
+        self,
+        *,
+        candidate: str,
+        protagonist: str,
+        text: str,
+    ) -> bool:
+        """判断大纲里的非正典姓名是否像旧主角名，而不是普通新角色。
+
+        只做高置信归一：
+        - 与正典主角同姓；
+        - 正典主角名没有出现在大纲中；
+        - 候选名在句首/条目开头或附近承担觉醒、获得、决定、逃亡、战斗等主角动作。
+        """
+        if not candidate or not protagonist or candidate == protagonist:
+            return False
+        if candidate[:1] != protagonist[:1]:
+            return False
+        if protagonist in text:
+            return False
+
+        escaped = re.escape(candidate)
+        leading_name = re.search(rf"(^|[\n。！？；;：:\d、\-\s]){escaped}", text) is not None
+        protagonist_actions = (
+            "觉醒", "获得", "绑定", "融合", "发现", "决定", "前往", "进入", "逃离", "逃亡",
+            "反杀", "击败", "突破", "修炼", "解析", "复制", "掌握", "回忆", "意识到",
+        )
+        nearby_action = re.search(
+            rf"{escaped}[^。！？\n]{{0,60}}({'|'.join(protagonist_actions)})",
+            text,
+        ) is not None
+        return leading_name and nearby_action
+
+    def _normalize_outline_against_character_canon(self, novel_id: str, outline: str) -> str:
+        """把上游结构树/旧稿大纲里的旧主角名统一到 Bible 正典名。"""
+        text = (outline or "").strip()
+        if not text:
+            return text
+        canon_names = self._get_canonical_character_names(novel_id)
+        protagonist = self._get_canonical_protagonist_name(novel_id)
+        if not protagonist:
+            return text
+        canon_set = set(canon_names)
+
+        replacements: Dict[str, str] = {}
+        # 泛化：同姓、非 Bible 名、承担主角动作的 2-3 字姓名，归并到正典主角。
+        surname = protagonist[:1]
+        for candidate in set(re.findall(rf"{re.escape(surname)}[\u4e00-\u9fff]{{1,2}}", text)):
+            if candidate == protagonist or candidate in canon_set or candidate in replacements:
+                continue
+            if self._looks_like_protagonist_alias(
+                candidate=candidate,
+                protagonist=protagonist,
+                text=text,
+            ):
+                replacements[candidate] = protagonist
+
+        normalized = text
+        for old, new in replacements.items():
+            normalized = normalized.replace(old, new)
+        if normalized != text:
+            logger.info(
+                "章节大纲角色名已按 Bible 正典归一 novel=%s replacements=%s",
+                novel_id,
+                replacements,
+            )
+        return normalized
+
+    def _assess_chapter_completeness(
+        self,
+        *,
+        content: str,
+        target_words: int,
+    ) -> List[str]:
+        """检查章节是否像完整章节，而不是停在半截动作/对白。"""
+        text = (content or "").strip()
+        if not text:
+            return ["正文为空"]
+        reasons: List[str] = []
+        word_count = self._estimate_chinese_words(text)
+        soft_min = max(900, int((target_words or 2000) * 0.80))
+        if word_count < soft_min:
+            reasons.append(f"章节篇幅偏短：约 {word_count} 字，完整章节建议不低于 {soft_min} 字")
+
+        tail = text[-260:]
+        stripped_tail = tail.rstrip()
+        if stripped_tail.endswith(("，", "、", "：", "；", ",", ":", ";", "——", "…")):
+            reasons.append("章节结尾疑似句子未写完")
+        quote_count = stripped_tail.count("“") + stripped_tail.count("”")
+        if quote_count % 2 == 1 or stripped_tail.endswith(("“", "「", "『")):
+            reasons.append("章节结尾疑似对白未闭合")
+
+        dangling_patterns = [
+            r"(刚要|正要|准备|还没来得及|才刚|下一刻|就在这时|忽然|突然|他抬起头|她抬起头)[^。！？]{0,40}$",
+            r"(门外|身后|耳边|屏幕上|裂隙里)[^。！？]{0,30}(响起|传来|亮起|浮现)[^。！？]{0,25}$",
+            r"(?:他|她|[一-龥]{2,4})[^。！？]{0,30}(伸出手|抬手|转身|迈步|开口|沉默下来)[^。！？]{0,25}$",
+        ]
+        if any(re.search(pattern, stripped_tail) for pattern in dangling_patterns):
+            reasons.append("章节结尾停在半截动作/突发事件上，缺少本章收束画面")
+
+        ending_markers = ("暗下去", "关上", "合拢", "落下", "沉入", "消失", "停住", "收回", "没有回头", "只剩下", "更深了")
+        has_terminal_punctuation = stripped_tail.endswith(("。", "！", "？", "”", "」", "』"))
+        if word_count >= soft_min and has_terminal_punctuation and not any(m in stripped_tail[-80:] for m in ending_markers):
+            # 不是硬失败，只在结尾明显是新事件/新对白时提醒。
+            if re.search(r"(说道|问道|低声说|声音响起|屏幕|提示|警报|脚步声|门外)", stripped_tail[-90:]):
+                reasons.append("章节末尾更像新场景开头，建议补一个本章落点")
+        return reasons
+
+    def _allows_first_person_narration(self, outline: str) -> bool:
+        """只有用户/大纲明确指定时，才允许整章第一人称叙述。"""
+        text = outline or ""
+        return bool(re.search(r"(第一人称|一人称|我视角|主角自述|自述体|日记体)", text))
+
+    def _strip_dialogue_for_narration_scan(self, content: str) -> str:
+        """移除常见中文引号内对白，避免把角色台词里的“我”误判为叙述人称。"""
+        text = content or ""
+        text = re.sub(r"“[^”]{0,240}”", "", text)
+        text = re.sub(r"「[^」]{0,240}」", "", text)
+        text = re.sub(r"『[^』]{0,240}』", "", text)
+        return text
+
+    def _assess_narrative_person(self, *, content: str, outline: str) -> List[str]:
+        """检查正文是否误用了第一人称叙述。"""
+        if self._allows_first_person_narration(outline):
+            return []
+        narration = self._strip_dialogue_for_narration_scan(content)
+        first_person_hits = re.findall(r"(?<![A-Za-z0-9])(?:我|我们|我的|我们的)(?![A-Za-z0-9])", narration)
+        if len(first_person_hits) >= 3:
+            return ["叙述人称疑似误用第一人称：未明确要求第一人称时，正文应使用第三人称限制视角"]
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", narration) if p.strip()]
+        if paragraphs and re.match(r"^(我|我的|我们|我们的)[^。！？]{0,80}[。！？]", paragraphs[0]):
+            return ["章节开头使用第一人称叙述，默认应改为第三人称限制视角"]
+        return []
+
+    def _assess_chapter_task_closure(self, *, content: str, outline: str) -> List[str]:
+        """检查章节核心任务是否已经阶段性落地，而不是停在新事件刚出现。"""
+        text = (content or "").strip()
+        if not text:
+            return []
+        reasons: List[str] = []
+        tail = text[-420:]
+
+        inciting_tail = re.search(
+            r"(?:(?:新|陌生|另一|第二|第三)[^。！？]{0,40})?"
+            r"(?:人|声音|脚步|提示|警报|文字|符号|影子|名字|信息|画面|物件|信号|亮光|异动|变化|轮廓)"
+            r"[^。！？]{0,80}(?:出现|浮现|亮起|响起|传来|推开|走出|伸出|震动|裂开|靠近|停下)"
+            r"|(?:身后|门外|耳边|屏幕|墙上|地面|水面|镜中|裂缝|阴影|光里|雾里|远处)"
+            r"[^。！？]{0,80}(?:出现|浮现|亮起|响起|传来|推开|走出|伸出|震动|裂开|靠近|停下)",
+            tail,
+        )
+        closure_markers = re.search(
+            r"(确认|完成|结束|落定|恢复|明白|看清|认出|拿到|失去|付出|代价|结果|失败|成功|逃出|被困|翻脸|和解|成交|破裂|危机|升级|解决)",
+            tail,
+        )
+        if inciting_tail and not closure_markers:
+            reasons.append("章节结尾停在新事件刚出现的位置，缺少信息确认、目标成败、代价、选择、关系变化或危机升级等阶段性结果")
+        return reasons
+
+    def _build_quality_gate(
+        self,
+        *,
+        content: str,
+        outline: str,
+        target_words: int,
+        style_warnings: List[Any],
+        consistency_report: ConsistencyReport,
+        ghost_annotations: List[GhostAnnotation],
+    ) -> Dict[str, Any]:
+        """生成后验收：把现有审稿信号收敛成可执行的门禁结果。"""
+        reasons: List[str] = []
+        word_count = self._estimate_chinese_words(content)
+        min_words = max(900, int(target_words * 0.80)) if target_words else 900
+        completeness_reasons = self._assess_chapter_completeness(
+            content=content,
+            target_words=target_words,
+        )
+        narrative_person_reasons = self._assess_narrative_person(
+            content=content,
+            outline=outline,
+        )
+        task_closure_reasons = self._assess_chapter_task_closure(
+            content=content,
+            outline=outline,
+        )
+
+        critical_style = [h for h in style_warnings if getattr(h, "severity", "") == "critical"]
+        warning_style = [h for h in style_warnings if getattr(h, "severity", "") == "warning"]
+        critical_issues = list(consistency_report.get_issues_by_severity(Severity.CRITICAL))
+        important_issues = list(consistency_report.get_issues_by_severity(Severity.IMPORTANT))
+        error_annotations = [ann for ann in ghost_annotations if ann.severity == "error"]
+        character_drift_annotations = [
+            ann for ann in ghost_annotations if ann.type == "character_inconsistency"
+        ]
+
+        if word_count < min_words:
+            reasons.append(f"正文长度不足：约 {word_count} 字，目标下限 {min_words} 字")
+        reasons.extend(completeness_reasons)
+        reasons.extend(narrative_person_reasons)
+        reasons.extend(task_closure_reasons)
+        if critical_style:
+            reasons.append(f"命中 critical 级 AI 腔/俗套 {len(critical_style)} 处")
+        if len(warning_style) >= 8:
+            reasons.append(f"warning 级 AI 腔/俗套偏多：{len(warning_style)} 处")
+        if critical_issues:
+            reasons.append(f"一致性严重问题 {len(critical_issues)} 个")
+        if important_issues:
+            reasons.append(f"一致性重要问题 {len(important_issues)} 个")
+        if error_annotations:
+            reasons.append(f"设定冲突 error 级批注 {len(error_annotations)} 个")
+        if character_drift_annotations:
+            reasons.append(f"角色正典漂移/疑似新增角色 {len(character_drift_annotations)} 个")
+
+        outline_terms = [
+            term.strip(" ，。！？；：,.!?;:、")
+            for term in outline.replace("\n", " ").split()
+            if len(term.strip(" ，。！？；：,.!?;:、")) >= 3
+        ]
+        missed_terms = [term for term in outline_terms[:12] if term and term not in content]
+        if len(missed_terms) >= 5:
+            reasons.append("正文疑似未覆盖章纲关键词：" + "、".join(missed_terms[:5]))
+
+        return {
+            "passed": not reasons,
+            "reasons": reasons,
+            "word_count": word_count,
+            "min_words": min_words,
+            "chapter_complete": not completeness_reasons,
+            "completeness_reasons": completeness_reasons,
+            "narrative_person_reasons": narrative_person_reasons,
+            "task_closure_reasons": task_closure_reasons,
+            "critical_style_count": len(critical_style),
+            "warning_style_count": len(warning_style),
+            "critical_consistency_count": len(critical_issues),
+            "important_consistency_count": len(important_issues),
+            "error_annotation_count": len(error_annotations),
+            "character_drift_count": len(character_drift_annotations),
+            "auto_repair_required": bool(
+                critical_style
+                or critical_issues
+                or important_issues
+                or error_annotations
+                or character_drift_annotations
+                or completeness_reasons
+                or narrative_person_reasons
+                or task_closure_reasons
+                or word_count < max(120, int(min_words * 0.35))
+            ),
+            "repair_attempted": False,
+            "repair_applied": False,
+        }
+
+    def _format_quality_repair_brief(
+        self,
+        *,
+        quality_gate: Dict[str, Any],
+        style_warnings: List[Any],
+        consistency_report: ConsistencyReport,
+        ghost_annotations: List[GhostAnnotation],
+    ) -> str:
+        lines = ["【未通过项】"]
+        lines.extend(f"- {reason}" for reason in quality_gate.get("reasons", []))
+
+        critical_hits = [h for h in style_warnings if getattr(h, "severity", "") == "critical"][:8]
+        if critical_hits:
+            lines.append("\n【需要清理的 AI 腔样例】")
+            for hit in critical_hits:
+                hint = getattr(hit, "replacement_hint", "") or "改为具体动作、对白或感官细节"
+                lines.append(f"- {hit.pattern}: {hit.text} -> {hint}")
+
+        issues = list(consistency_report.issues or [])[:6]
+        if issues:
+            lines.append("\n【一致性问题】")
+            for issue in issues:
+                lines.append(f"- {issue.severity.value}/{issue.type.value}: {issue.description}")
+
+        errors = [ann for ann in ghost_annotations if ann.severity == "error"][:6]
+        if errors:
+            lines.append("\n【设定冲突】")
+            for ann in errors:
+                lines.append(f"- {ann.message}")
+
+        character_drifts = [ann for ann in ghost_annotations if ann.type == "character_inconsistency"][:8]
+        if character_drifts:
+            lines.append("\n【角色正典问题】")
+            for ann in character_drifts:
+                expected = f"（应为：{ann.expected}）" if ann.expected else ""
+                lines.append(f"- {ann.message}{expected}")
+
+        return "\n".join(lines)
+
+    def _get_prompt_registry_texts(self, node_key: str) -> tuple[str, str]:
+        """读取 CPMS 节点文本；失败时返回空字符串，由调用方 fallback。"""
+        try:
+            from infrastructure.ai.prompt_registry import get_prompt_registry
+
+            registry = get_prompt_registry()
+            return registry.get_system(node_key) or "", registry.get_user_template(node_key) or ""
+        except Exception as exc:
+            logger.debug("PromptRegistry 节点读取失败 node_key=%s: %s", node_key, exc)
+            return "", ""
+
+    def _build_context_alignment_protocol(self, context: str, outline: str) -> str:
+        """生成章节主 prompt 的上下文对齐协议，CPMS 节点优先，代码兜底。"""
+        system, user = self._get_prompt_registry_texts(_CHAPTER_CONTEXT_ALIGNMENT_NODE_KEY)
+        template = "\n\n".join(part for part in [system, user] if part.strip()).strip()
+        if not template:
+            template = _FALLBACK_CONTEXT_ALIGNMENT_PROTOCOL
+        rendered = _safe_format(
+            template,
+            {
+                "context": context,
+                "outline": outline,
+                "priority_order": _CONTEXT_PRIORITY_ORDER,
+            },
+        ).strip()
+        if "FACT_LOCK" not in rendered or "Bible" not in rendered:
+            rendered = _FALLBACK_CONTEXT_ALIGNMENT_PROTOCOL
+        return rendered
+
+    async def _repair_chapter_against_quality_gate(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        outline: str,
+        original_content: str,
+        bundle: Dict[str, Any],
+        quality_gate: Dict[str, Any],
+        style_warnings: List[Any],
+        consistency_report: ConsistencyReport,
+        ghost_annotations: List[GhostAnnotation],
+        target_words: int,
+        scene_director: Optional[SceneDirectorAnalysis],
+    ) -> Optional[str]:
+        """门禁失败时进行一次受约束整章修稿，继续使用同一上下文对齐。"""
+        if not quality_gate.get("reasons"):
+            return None
+
+        repair_brief = self._format_quality_repair_brief(
+            quality_gate=quality_gate,
+            style_warnings=style_warnings,
+            consistency_report=consistency_report,
+            ghost_annotations=ghost_annotations,
+        )
+        context = bundle["context"]
+        cap = min(len(context), 32000)
+        character_canon_contract = (
+            bundle.get("character_canon_contract")
+            or self._current_character_canon_contract
+            or self._build_character_canon_contract(novel_id, chapter_number)
+        )
+        system_template, user_template = self._get_prompt_registry_texts(_CHAPTER_QUALITY_REPAIR_NODE_KEY)
+        system = (system_template or _FALLBACK_QUALITY_REPAIR_SYSTEM).strip()
+        user = _safe_format(
+            user_template or _FALLBACK_QUALITY_REPAIR_USER,
+            {
+                "context": context[:cap],
+                "character_canon_contract": character_canon_contract,
+                "outline": outline,
+                "quality_feedback": repair_brief,
+                "target_words": target_words,
+                "min_words": quality_gate.get("min_words", 800),
+                "original_content": original_content,
+            },
+        )
+        try:
+            cfg = GenerationConfig(max_tokens=max(4096, int(target_words * 2.2)), temperature=0.85)
+            result = await self.llm_service.generate(Prompt(system=system, user=user), cfg)
+            repaired = self._finalize_chapter_body_text(novel_id, result.content or "")
+            if repaired.strip():
+                return repaired
+        except Exception as e:
+            logger.warning(
+                "质量门禁自动修稿失败 novel=%s chapter=%s: %s",
+                novel_id,
+                chapter_number,
+                e,
+            )
+        return None
+
+    async def _apply_quality_gate_and_optional_repair(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        outline: str,
+        content: str,
+        bundle: Dict[str, Any],
+        post: Dict[str, Any],
+        target_words: int,
+        scene_director: Optional[SceneDirectorAnalysis],
+    ) -> tuple[str, Dict[str, Any], Dict[str, Any]]:
+        quality_gate = self._build_quality_gate(
+            content=content,
+            outline=outline,
+            target_words=target_words,
+            style_warnings=post["style_warnings"],
+            consistency_report=post["consistency_report"],
+            ghost_annotations=post["ghost_annotations"],
+        )
+        if quality_gate["passed"]:
+            return content, post, quality_gate
+        if not quality_gate.get("auto_repair_required"):
+            return content, post, quality_gate
+
+        logger.info("质量门禁未通过，开始一次自动修稿: %s", "; ".join(quality_gate["reasons"]))
+        quality_gate["repair_attempted"] = True
+        repaired = await self._repair_chapter_against_quality_gate(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            outline=outline,
+            original_content=content,
+            bundle=bundle,
+            quality_gate=quality_gate,
+            style_warnings=post["style_warnings"],
+            consistency_report=post["consistency_report"],
+            ghost_annotations=post["ghost_annotations"],
+            target_words=target_words,
+            scene_director=scene_director,
+        )
+        if not repaired:
+            return content, post, quality_gate
+
+        repaired_post = await self.post_process_generated_chapter(
+            novel_id, chapter_number, outline, repaired, scene_director=scene_director, persist_updates=False
+        )
+        repaired_gate = self._build_quality_gate(
+            content=repaired,
+            outline=outline,
+            target_words=target_words,
+            style_warnings=repaired_post["style_warnings"],
+            consistency_report=repaired_post["consistency_report"],
+            ghost_annotations=repaired_post["ghost_annotations"],
+        )
+        repaired_gate["repair_attempted"] = True
+        repaired_gate["repair_applied"] = True
+        repaired_gate["original_reasons"] = quality_gate["reasons"]
+        return repaired, repaired_post, repaired_gate
 
     async def generate_chapter(
         self,
@@ -588,7 +1452,7 @@ class AutoNovelGenerationWorkflow:
         chapter_number: int,
         outline: str,
         scene_director: Optional[SceneDirectorAnalysis] = None,
-        enable_beats: bool = True
+        enable_beats: bool = False
     ) -> GenerationResult:
         """生成章节（完整工作流）
 
@@ -605,6 +1469,7 @@ class AutoNovelGenerationWorkflow:
             ValueError: 如果参数无效
             RuntimeError: 如果生成失败
         """
+        outline = self._normalize_outline_against_character_canon(novel_id, outline)
         # 验证输入
         if chapter_number < 1:
             raise ValueError("chapter_number must be positive")
@@ -625,12 +1490,13 @@ class AutoNovelGenerationWorkflow:
             novel_id, chapter_number, outline, scene_director=scene_director
         )
         context = bundle["context"]
+        self._current_character_canon_contract = bundle.get("character_canon_contract") or ""
         context_tokens = bundle["context_tokens"]
         logger.info(f"  ✓ 上下文已构建: {len(context)} 字符, 约 {context_tokens} tokens")
 
         logger.info("阶段 3: 生成 - 调用 LLM")
-        config = GenerationConfig()
         target_words = self._resolve_target_chapter_words(novel_id)
+        config = self._chapter_generation_config(target_words)
         
         # 如果使用节拍模式，先放大节拍
         beats = []
@@ -737,6 +1603,7 @@ class AutoNovelGenerationWorkflow:
                         beat_target_words=beat.target_words,
                         voice_anchors=bundle.get("voice_anchors") or "",
                         chapter_draft_so_far=prior_draft,
+                        character_canon_contract=bundle.get("character_canon_contract") or "",
                     )
 
                     llm_result = await self.llm_service.generate(prompt, config)
@@ -793,6 +1660,7 @@ class AutoNovelGenerationWorkflow:
                 plot_tension=bundle["plot_tension"],
                 style_summary=bundle["style_summary"],
                 voice_anchors=bundle.get("voice_anchors") or "",
+                character_canon_contract=bundle.get("character_canon_contract") or "",
                 chapter_target_words=target_words,
             )
             logger.info(f"  → 发送请求到 LLM (max_tokens={config.max_tokens}, temperature={config.temperature})")
@@ -814,13 +1682,40 @@ class AutoNovelGenerationWorkflow:
 
         logger.info("阶段 4: 后处理（post_process_generated_chapter）")
         post = await self.post_process_generated_chapter(
-            novel_id, chapter_number, outline, content, scene_director=scene_director
+            novel_id, chapter_number, outline, content, scene_director=scene_director, persist_updates=False
         )
+        content, post, quality_gate = await self._apply_quality_gate_and_optional_repair(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            outline=outline,
+            content=content,
+            bundle=bundle,
+            post=post,
+            target_words=target_words,
+            scene_director=scene_director,
+        )
+        post["memory_delta"] = await self._commit_generated_chapter_updates(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            outline=outline,
+            content=content,
+            chapter_state=post["chapter_state"],
+        )
+        display_beats = _beats_for_sse(beats)
+        if not display_beats:
+            display_beats = self._build_retrospective_micro_beats(
+                content,
+                target_words=target_words,
+            )
+            if display_beats:
+                bundle["micro_beats"] = display_beats
         style_warnings = post["style_warnings"]
         consistency_report = post["consistency_report"]
         ghost_annotations = post["ghost_annotations"]
         if style_warnings:
             logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
+        if not quality_gate.get("passed"):
+            logger.info("  ⚠ 质量门禁仍有未通过项: %s", "; ".join(quality_gate.get("reasons", [])))
 
         # Phase 5: Review - 返回结果
         logger.info(f"阶段 5: 完成 - 章节生成完成")
@@ -836,7 +1731,8 @@ class AutoNovelGenerationWorkflow:
             context_used=context,
             token_count=token_count,
             ghost_annotations=ghost_annotations,
-            style_warnings=style_warnings
+            style_warnings=style_warnings,
+            quality_gate=quality_gate,
         )
 
     async def _magnify_outline_with_execution_plan(
@@ -903,7 +1799,7 @@ class AutoNovelGenerationWorkflow:
         chapter_number: int,
         outline: str,
         scene_director: Optional[SceneDirectorAnalysis] = None,
-        enable_beats: bool = True,
+        enable_beats: bool = False,
         regeneration_guidance: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """流式生成章节：阶段事件 + 正文 token 流 + 最终 done（含一致性报告）。
@@ -920,6 +1816,7 @@ class AutoNovelGenerationWorkflow:
                                    上一版本的问题描述，并被要求针对性改进。
         """
         try:
+            outline = self._normalize_outline_against_character_canon(novel_id, outline)
             if chapter_number < 1:
                 raise ValueError("chapter_number must be positive")
             if not outline or not outline.strip():
@@ -936,12 +1833,15 @@ class AutoNovelGenerationWorkflow:
                 novel_id, chapter_number, outline, scene_director=scene_director
             )
             context = bundle["context"]
+            self._current_novel_id = novel_id
+            self._current_chapter_number = chapter_number
+            self._current_character_canon_contract = bundle.get("character_canon_contract") or ""
             context_tokens = bundle["context_tokens"]
             logger.info(f"  ✓ 上下文已构建: {len(context)} 字符, 约 {context_tokens} tokens")
 
-            config = GenerationConfig()
             chunk_count = 0
             target_words = self._resolve_target_chapter_words(novel_id)
+            config = self._chapter_generation_config(target_words)
 
             beats: List[Any] = []
             if enable_beats:
@@ -1062,6 +1962,7 @@ class AutoNovelGenerationWorkflow:
                             voice_anchors=bundle.get("voice_anchors") or "",
                             chapter_draft_so_far=prior_draft,
                             regeneration_guidance=regeneration_guidance if i == 0 else None,
+                            character_canon_contract=bundle.get("character_canon_contract") or "",
                         )
 
                         buffered: list[str] = []
@@ -1150,6 +2051,7 @@ class AutoNovelGenerationWorkflow:
                     voice_anchors=bundle.get("voice_anchors") or "",
                     regeneration_guidance=regeneration_guidance,
                     chapter_target_words=target_words,
+                    character_canon_contract=bundle.get("character_canon_contract") or "",
                 )
                 
                 logger.info(f"  → 发送流式请求到 LLM")
@@ -1182,8 +2084,35 @@ class AutoNovelGenerationWorkflow:
             yield {"type": "phase", "phase": "post"}
             logger.info("阶段 4: post_process_generated_chapter")
             post = await self.post_process_generated_chapter(
-                novel_id, chapter_number, outline, content, scene_director=scene_director
+                novel_id, chapter_number, outline, content, scene_director=scene_director, persist_updates=False
             )
+            content, post, quality_gate = await self._apply_quality_gate_and_optional_repair(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                outline=outline,
+                content=content,
+                bundle=bundle,
+                post=post,
+                target_words=target_words,
+                scene_director=scene_director,
+            )
+            post["memory_delta"] = await self._commit_generated_chapter_updates(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                outline=outline,
+                content=content,
+                chapter_state=post["chapter_state"],
+            )
+            display_beats = _beats_for_sse(beats)
+            if not display_beats:
+                display_beats = self._build_retrospective_micro_beats(
+                    content,
+                    target_words=target_words,
+                )
+                if display_beats:
+                    bundle["micro_beats"] = display_beats
+                    yield {"type": "beats_generated", "beats": display_beats}
+            yield {"type": "quality_gate", **quality_gate}
             style_warnings = post["style_warnings"]
             consistency_report = post["consistency_report"]
             ghost_annotations = post["ghost_annotations"]
@@ -1207,7 +2136,8 @@ class AutoNovelGenerationWorkflow:
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
                 "chars": len(content),
-                "beats": _beats_for_sse(beats),
+                "beats": display_beats,
+                "quality_gate": quality_gate,
                 "ghost_annotations": [ann.to_dict() for ann in ghost_annotations],
                 "style_warnings": [
                     {
@@ -1252,10 +2182,10 @@ class AutoNovelGenerationWorkflow:
             out = await self.llm_service.generate(outline_prompt, cfg)
             text = strip_reasoning_artifacts((out.content or "").strip())
             if text:
-                return text
+                return self._normalize_outline_against_character_canon(novel_id, text)
         except Exception as e:
             logger.warning("suggest_outline failed: %s", e)
-        return seed
+        return self._normalize_outline_against_character_canon(novel_id, seed)
 
     async def generate_chapter_with_review(
         self,
@@ -1436,6 +2366,7 @@ class AutoNovelGenerationWorkflow:
         beat_target_words: Optional[int] = None,
         voice_anchors: str = "",
         chapter_draft_so_far: str = "",
+        character_canon_contract: str = "",
     ) -> Prompt:
         """构建与 HTTP 单章 / 流式 / 托管按节拍写作一致的 Prompt（对外 API）。"""
         return self._build_prompt(
@@ -1450,6 +2381,7 @@ class AutoNovelGenerationWorkflow:
             beat_target_words=beat_target_words,
             voice_anchors=voice_anchors,
             chapter_draft_so_far=chapter_draft_so_far,
+            character_canon_contract=character_canon_contract,
         )
 
     def _build_prompt(
@@ -1468,6 +2400,7 @@ class AutoNovelGenerationWorkflow:
         chapter_draft_so_far: str = "",
         regeneration_guidance: Optional[str] = None,
         chapter_target_words: Optional[int] = None,
+        character_canon_contract: str = "",
     ) -> Prompt:
         """构建 LLM 提示词
 
@@ -1483,6 +2416,7 @@ class AutoNovelGenerationWorkflow:
             voice_anchors: Bible 角色声线/小动作锚点（高优先级 System 提示）
             chapter_draft_so_far: 同章内当前节拍之前已生成的正文
             chapter_target_words: 非 beat 模式下的整章目标字数（覆盖默认硬编码值）
+            character_canon_contract: Bible 角色正典锁（姓名、身份、关系、隐藏信息等硬约束）
 
         Returns:
             Prompt 对象
@@ -1491,6 +2425,7 @@ class AutoNovelGenerationWorkflow:
         pt = (plot_tension or "").strip()
         ss = (style_summary or "").strip()
         va = (voice_anchors or "").strip()
+        cc = (character_canon_contract or self._current_character_canon_contract or "").strip()
         planning_parts: list[str] = []
         if sc and sc not in ("Storyline context unavailable",):
             planning_parts.append(f"【故事线 / 里程碑】\n{sc}")
@@ -1517,30 +2452,30 @@ class AutoNovelGenerationWorkflow:
         # 字数控制：像小说家一样自然收束，而非粗暴截断
         if beat_target_words:
             length_rule = (
-                f"7. 【字数指引】本节拍约 {beat_target_words} 字。"
+                f"【字数指引】本节拍约 {beat_target_words} 字。"
                 f"用有信息的对话、动作与因果推进填到目标附近，禁止为凑字重复描写同一致震撼或同一情绪；"
                 f"收束用完整句，不要戛然而止。"
             )
         elif beat_mode:
-            length_rule = "7. 按下方节拍说明控制篇幅，勿写章节标题"
+            length_rule = "按下方节拍说明控制篇幅，勿写章节标题"
         elif chapter_target_words:
             length_rule = (
-                f"7. 【章节字数指引】本章目标约 {chapter_target_words} 字。"
+                f"【章节字数指引】本章目标约 {chapter_target_words} 字。"
                 f"完整覆盖下方大纲的所有要点，字数不足时优先补充对话与场景细节，禁止重复情节水字；"
                 f"用完整句收束，不要戛然而止。"
             )
         else:
-            length_rule = "7. 章节长度：3000-4000字"
+            length_rule = "章节长度：3000-4000字"
         beat_extra = ""
         if beat_mode and beat_index is not None and total_beats is not None and total_beats > 0:
             if prior_in_chapter:
                 beat_extra = (
-                    f"\n9. 本章第 {beat_index + 1}/{total_beats} 段：用户消息中「本章已生成正文」为当前章已写部分，"
+                    f"\n本章第 {beat_index + 1}/{total_beats} 段：用户消息中「本章已生成正文」为当前章已写部分，"
                     "请从其**之后**自然续写，不得复述或改写其中对白与已发生情节。\n"
                 )
             else:
                 beat_extra = (
-                    f"\n9. 本章第 {beat_index + 1}/{total_beats} 段：与前后节拍连贯，避免同章内重复铺垫或重复对白。\n"
+                    f"\n本章第 {beat_index + 1}/{total_beats} 段：与前后节拍连贯，避免同章内重复铺垫或重复对白。\n"
                 )
 
         # ★ V6: 从 MemoryEngine 获取 fact_lock 文本块（T0 注入）
@@ -1615,7 +2550,12 @@ class AutoNovelGenerationWorkflow:
             "theme_rules": theme_rules,
             "planning_section": planning_section,
             "voice_block": voice_block,
+            "behavior_protocol": "",
+            "character_state_lock": "",
+            "nervous_habits": "",
+            "allowlist_block": "",
             "context": context,
+            "character_canon_contract": cc,
             "fact_lock": fact_lock,
             "shuangwen_directive": shuangwen_directive,
             "prose_discipline": prose_discipline,
@@ -1625,9 +2565,23 @@ class AutoNovelGenerationWorkflow:
         }
         system_message = _safe_format(system_template, system_vars)
 
+        theme_block = "\n".join(
+            block.strip()
+            for block in (theme_persona, theme_rules, format_rules)
+            if block and block.strip()
+        )
+        if theme_block and not any(
+            marker in system_message
+            for marker in ("作家风格", "题材专项规则", "题材格式", "题材禁忌")
+        ):
+            system_message = system_message.rstrip() + "\n\n" + theme_block
+
         # 旧版 CPMS 模板可能未含 {prose_discipline} 占位符：仍注入反八股块，避免升级后长期不生效
         if "行文戒律（反八股 / 控水分）" not in system_message:
             system_message = system_message.rstrip() + "\n\n" + prose_discipline
+
+        if shuangwen_directive.strip() and "爽文执行" not in system_message:
+            system_message = system_message.rstrip() + "\n\n" + shuangwen_directive
 
         if "人名硬约束" not in system_message:
             system_message = system_message.rstrip() + (
@@ -1636,7 +2590,26 @@ class AutoNovelGenerationWorkflow:
                 "正文必须以 Bible 为准统一使用 Bible 姓名，不得继续使用大纲里的占位名。\n"
             )
 
+        if cc and "角色正典锁" not in system_message:
+            system_message = system_message.rstrip() + "\n\n" + cc
+
+        if "上下文对齐协议" not in system_message:
+            system_message = system_message.rstrip() + "\n\n" + self._build_context_alignment_protocol(context, outline)
+
         user_message = _safe_format(user_template, {"outline": outline, "beat_section": ""})
+        user_message = re.sub(r"结尾别收干净。.*?让读者非看下一章不可。?", "", user_message)
+        user_message = re.sub(r"对话说到一半|一句话说到一半停了", "用未解决问题或新代价作为钩子", user_message)
+        system_message = re.sub(r"结尾别收干净。.*?让读者非看下一章不可。?", "", system_message)
+        system_message = re.sub(r"对话说到一半|一句话说到一半停了", "用未解决问题或新代价作为钩子", system_message)
+        completion_contract = (
+            "【完整章节收束】本章必须完成一个可指认的阶段性结果。"
+            "可以留下下一章钩子，但钩子必须落在本章结果之后；"
+            "禁止停在半截句子、半截对白、半截动作或刚出现的新事件上。"
+        )
+        if "完整章节收束" not in system_message and "结尾要有落点" not in user_message:
+            system_message = system_message.rstrip() + "\n\n" + completion_contract
+        if "半截对白" not in user_message:
+            user_message = user_message.rstrip() + "\n\n" + completion_contract
 
         if beat_mode and prior_in_chapter:
             # V2：基于锚点的动态连贯性要求
@@ -1720,7 +2693,7 @@ class AutoNovelGenerationWorkflow:
         设计决策：
         - 主工作流的 system prompt 包含大量动态变量（theme_persona, fact_lock 等），
           不适合直接用 Registry.render() 一步渲染，而是获取模板后由 _build_prompt 手动 format。
-        - 如果 PromptRegistry 中注册了 workflow-chapter-generation 节点，
+        - 如果 PromptRegistry 中注册了 chapter-generation-main 节点，
           用户可在提示词广场直接编辑此模板并实时生效。
         - 降级时使用模块级 _FALLBACK_SYSTEM_TEMPLATE 常量。
 

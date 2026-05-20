@@ -103,7 +103,16 @@ class BibleService:
         character_id: str,
         name: str,
         description: str,
-        relationships: list = None
+        role: str = "",
+        relationships: list = None,
+        public_profile: str = "",
+        hidden_profile: str = "",
+        mental_state: str = "NORMAL",
+        mental_state_reason: str = "",
+        verbal_tic: str = "",
+        idle_behavior: str = "",
+        core_belief: str = "",
+        voice_profile: dict = None,
     ) -> BibleDTO:
         """添加人物
 
@@ -112,7 +121,16 @@ class BibleService:
             character_id: 人物 ID
             name: 人物名称
             description: 人物描述
+            role: 角色定位（主角/反派/配角等）
             relationships: 人物关系列表
+            public_profile: 公开形象
+            hidden_profile: 隐藏身份
+            mental_state: 心理状态
+            mental_state_reason: 心理状态原因
+            verbal_tic: 口头禅/语言习惯
+            idle_behavior: 下意识动作
+            core_belief: 核心信念
+            voice_profile: 角色声音配置
 
         Returns:
             更新后的 BibleDTO
@@ -128,7 +146,16 @@ class BibleService:
             id=CharacterId(character_id),
             name=name,
             description=description,
+            role=role,
             relationships=relationships or [],
+            public_profile=public_profile,
+            hidden_profile=hidden_profile,
+            mental_state=mental_state,
+            mental_state_reason=mental_state_reason,
+            verbal_tic=verbal_tic,
+            idle_behavior=idle_behavior,
+            core_belief=core_belief,
+            voice_profile=voice_profile or {},
         )
         bible.add_character(character)
         self.bible_repository.save(bible)
@@ -421,6 +448,12 @@ class BibleService:
         # 添加新的人物（锚点字段：请求未传则沿用库内旧值，避免整本保存冲掉沙盒写入）
         for char_data in characters:
             prev = prev_chars.get(char_data.id)
+            if getattr(char_data, "role", None) is not None:
+                role = char_data.role or ""
+            elif prev is not None:
+                role = getattr(prev, "role", None) or ""
+            else:
+                role = ""
             if char_data.mental_state is not None:
                 ms = char_data.mental_state or "NORMAL"
             elif prev is not None:
@@ -491,6 +524,7 @@ class BibleService:
                 id=CharacterId(char_data.id),
                 name=char_data.name,
                 description=char_data.description,
+                role=role,
                 relationships=char_data.relationships,
                 public_profile=pub,
                 hidden_profile=hid,

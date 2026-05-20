@@ -32,6 +32,8 @@ BIBLE_STYLE_CONVENTION = "bible-style-convention"
 # ── Chapter generation ───────────────────────────────────────────────────
 CHAPTER_GENERATION_MAIN = "chapter-generation-main"
 CHAPTER_GENERATION_BASIC = "chapter-generation-basic"
+CHAPTER_CONTEXT_ALIGNMENT = "chapter-context-alignment"
+CHAPTER_QUALITY_REPAIR = "chapter-quality-repair"
 CHAPTER_NARRATIVE_SYNC = "chapter-narrative-sync"
 CHAPTER_STATE_EXTRACTION = "chapter-state-extraction"
 CHAPTER_SUMMARIZER = "chapter-summarizer"
@@ -62,6 +64,8 @@ MEMORY_EXTRACTION = "memory-extraction"
 
 # ── Planning ─────────────────────────────────────────────────────────────
 PLANNING_QUICK_MACRO = "planning-quick-macro"
+PLANNING_MACRO_PRECISE = "planning-macro-precise"
+PLANNING_MACRO_REPAIR = "planning-macro-repair"
 PLANNING_ACT = "planning-act"
 PLANNING_MAIN_PLOT_SUGGEST = "planning-main-plot-suggest"
 OUTLINE_BEAT_PARTITION = "outline-beat-partition"
@@ -94,7 +98,6 @@ ANTI_AI_FINALE_ENHANCEMENT = "anti-ai-finale-enhancement"
 ANTI_AI_MID_GENERATION_REFRESH = "anti-ai-mid-generation-refresh"
 
 # ── Autopilot / Workflow ─────────────────────────────────────────────────
-WORKFLOW_CHAPTER_GENERATION = "workflow-chapter-generation"
 AUTOPILOT_STREAM_BEAT = "autopilot-stream-beat"
 AUTOPILOT_INFO_DENSITY_SUPPLEMENT = "autopilot-info-density-supplement"
 BEAT_FOCUS_INSTRUCTIONS = "beat-focus-instructions"
@@ -120,6 +123,7 @@ ALL_KEYS: frozenset[str] = frozenset({
     BIBLE_STYLE_CONVENTION, BIBLE_WORLDBUILDING_DIMENSION, BIBLE_WORLDBUILDING_FIELD,
     # Chapter
     CHAPTER_GENERATION_MAIN, CHAPTER_GENERATION_BASIC,
+    CHAPTER_CONTEXT_ALIGNMENT, CHAPTER_QUALITY_REPAIR,
     CHAPTER_NARRATIVE_SYNC, CHAPTER_STATE_EXTRACTION, CHAPTER_SUMMARIZER,
     CHAPTER_BRIDGE_EXTRACT, CHAPTER_BRIDGE_CHECK, CHAPTER_BRIDGE_FIX,
     # Scene
@@ -135,7 +139,8 @@ ALL_KEYS: frozenset[str] = frozenset({
     # Memory
     MEMORY_EXTRACTION,
     # Planning
-    PLANNING_QUICK_MACRO, PLANNING_ACT, PLANNING_MAIN_PLOT_SUGGEST,
+    PLANNING_QUICK_MACRO, PLANNING_MACRO_PRECISE, PLANNING_MACRO_REPAIR,
+    PLANNING_ACT, PLANNING_MAIN_PLOT_SUGGEST,
     OUTLINE_BEAT_PARTITION,
     # Style
     STYLE_ANALYSIS, VOICE_STYLE_ANALYSIS, VOICE_BASELINE_ANALYSIS,
@@ -151,7 +156,7 @@ ALL_KEYS: frozenset[str] = frozenset({
     ANTI_AI_CHAPTER_AUDIT, ANTI_AI_CHARACTER_STATE_LOCK,
     ANTI_AI_FINALE_ENHANCEMENT, ANTI_AI_MID_GENERATION_REFRESH,
     # Autopilot / Workflow
-    WORKFLOW_CHAPTER_GENERATION, AUTOPILOT_STREAM_BEAT,
+    AUTOPILOT_STREAM_BEAT,
     AUTOPILOT_INFO_DENSITY_SUPPLEMENT, BEAT_FOCUS_INSTRUCTIONS,
     LIFECYCLE_PHASE_DIRECTIVES, REFACTOR_PROPOSAL,
     REFACTOR_PROPOSAL_MACRO, PLANNING_MAIN_PLOT_OPTION,

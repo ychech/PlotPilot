@@ -17,6 +17,7 @@ from domain.novel.value_objects.consistency_report import ConsistencyReport, Iss
 from domain.novel.value_objects.chapter_state import ChapterState
 from domain.ai.services.llm_service import LLMService, GenerationResult as LLMResult
 from domain.ai.value_objects.token_usage import TokenUsage
+from domain.novel.value_objects.novel_id import NovelId
 
 
 @pytest.fixture
@@ -249,6 +250,23 @@ class TestGenerateChapterStream:
         assert events[-1]["content"] == "Generated chapter content"
         assert events[-1]["token_count"] == 9250
 
+    @pytest.mark.asyncio
+    async def test_stream_emits_retrospective_beats_when_beats_disabled(self, workflow):
+        events = []
+        async for e in workflow.generate_chapter_stream(
+            "novel-1",
+            1,
+            "Chapter outline",
+            enable_beats=False,
+        ):
+            events.append(e)
+
+        beats_events = [e for e in events if e["type"] == "beats_generated"]
+        assert beats_events
+        assert beats_events[-1]["beats"][0]["description"]
+        assert events[-1]["type"] == "done"
+        assert events[-1]["beats"] == beats_events[-1]["beats"]
+
 
 class TestExtractChapterState:
     """测试 _extract_chapter_state 方法"""
@@ -362,8 +380,8 @@ class TestConflictDetectionIntegration:
         assert "水系" in result.ghost_annotations[0].message
         assert "火系" in result.ghost_annotations[0].message
 
-        # 验证冲突检测服务被调用
-        mock_conflict_service.detect.assert_called_once()
+        # 验证冲突检测服务被调用；质量门禁触发修稿时会对最终稿再审一次
+        assert mock_conflict_service.detect.call_count >= 1
 
     @pytest.mark.asyncio
     async def test_generate_chapter_no_annotations_when_no_conflicts(
@@ -525,8 +543,8 @@ class TestStyleIntegration:
         assert result.style_warnings[0].text == "熊熊烈火"
         assert result.style_warnings[1].pattern == "眼神闪过系列"
 
-        # 验证扫描器被调用
-        mock_scanner.scan_cliches.assert_called_once_with("Generated chapter content")
+        # 验证扫描器被调用；质量门禁触发修稿时会对最终稿再扫一次
+        mock_scanner.scan_cliches.assert_any_call("Generated chapter content")
 
     @pytest.mark.asyncio
     async def test_generate_chapter_injects_fingerprint_summary(
@@ -657,3 +675,244 @@ class TestStyleIntegration:
         assert len(done_event["style_warnings"]) == 1
         assert done_event["style_warnings"][0]["pattern"] == "熊熊系列"
         assert done_event["style_warnings"][0]["text"] == "熊熊烈火"
+
+
+class TestQualityGate:
+    """测试生成后质量门禁与上下文对齐注入"""
+
+    @pytest.mark.asyncio
+    async def test_generate_chapter_repairs_when_quality_gate_fails(
+        self,
+        mock_context_builder,
+        mock_consistency_checker,
+        mock_storyline_manager,
+        mock_plot_arc_repository,
+    ):
+        from application.audit.services.cliche_scanner import ClicheHit
+
+        llm = Mock(spec=LLMService)
+        llm.generate = AsyncMock(side_effect=[
+            LLMResult(content="短文 眼中闪过一丝", token_usage=TokenUsage(1, 1)),
+            LLMResult(content="修订后的章节正文。" * 500, token_usage=TokenUsage(1, 1)),
+        ])
+
+        scanner = Mock()
+        scanner.scan_cliches.side_effect = [
+            [ClicheHit(pattern="眼神闪过系列", text="眼中闪过一丝", start=3, end=10, severity="critical")],
+            [],
+            [],
+        ]
+
+        workflow = AutoNovelGenerationWorkflow(
+            context_builder=mock_context_builder,
+            consistency_checker=mock_consistency_checker,
+            storyline_manager=mock_storyline_manager,
+            plot_arc_repository=mock_plot_arc_repository,
+            llm_service=llm,
+            cliche_scanner=scanner,
+        )
+        workflow.state_extractor = None
+
+        result = await workflow.generate_chapter("novel-1", 1, "测试大纲")
+
+        assert result.content.startswith("修订后的章节正文")
+        assert result.quality_gate["repair_attempted"] is True
+        assert result.quality_gate["repair_applied"] is True
+        assert llm.generate.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_stream_emits_quality_gate_event(
+        self,
+        workflow,
+    ):
+        events = []
+        async for event in workflow.generate_chapter_stream("novel-1", 1, "测试大纲"):
+            events.append(event)
+
+        assert any(ev["type"] == "quality_gate" for ev in events)
+        done = events[-1]
+        assert done["type"] == "done"
+        assert "quality_gate" in done
+
+    def test_prompt_includes_context_alignment_protocol(self, workflow):
+        prompt = workflow._build_prompt(
+            "Layer 1\n\n=== RECENT CHAPTERS ===\nrecent\n\n=== VECTOR RECALL ===\nrecall",
+            "测试大纲",
+            chapter_target_words=2500,
+        )
+
+        assert "上下文对齐协议" in prompt.system
+        assert "FACT_LOCK > Bible 正典" in prompt.system
+
+    def test_context_alignment_protocol_has_fallback_priority(self, workflow):
+        protocol = workflow._build_context_alignment_protocol("context", "outline")
+
+        assert "上下文对齐协议" in protocol
+        assert "FACT_LOCK > Bible 正典" in protocol
+
+    def test_prompt_does_not_encourage_dangling_ending(self, workflow):
+        prompt = workflow._build_prompt("CTX", "测试大纲", chapter_target_words=2000)
+
+        combined = prompt.system + "\n" + prompt.user
+        assert "完整章节收束" in combined or "结尾要有落点" in combined
+        assert "说到一半停了" not in combined
+        assert "半截对白" in combined
+        assert "亲历者" not in combined
+        assert "第三人称限制视角" in combined
+
+    def test_prompt_includes_style_and_theme_constraints(self, workflow):
+        theme = Mock()
+        theme.build_system_persona.return_value = "【作家风格】高武废土叙述者"
+        theme.build_writing_rules.return_value = "【题材专项规则】力量体系要有压迫感"
+        theme.build_format_rules.return_value = "【题材格式】第三人称限制视角"
+        workflow._theme_integrator = theme
+
+        prompt = workflow._build_prompt(
+            "CTX",
+            "测试大纲",
+            style_summary="平均句长偏短，动作密度高。",
+            voice_anchors="林渊：说话简短，紧张时按住左腕。",
+            chapter_target_words=2500,
+        )
+
+        assert "【风格约束】" in prompt.system
+        assert "平均句长偏短" in prompt.system
+        assert "【角色声线与肢体语言" in prompt.system
+        assert "林渊：说话简短" in prompt.system
+        assert "【作家风格】高武废土叙述者" in prompt.system
+        assert "【题材专项规则】力量体系要有压迫感" in prompt.system
+        assert "{behavior_protocol}" not in prompt.system
+
+
+class TestCharacterCanonGuard:
+    """测试角色正典锁与角色漂移门禁"""
+
+    def _bible_with_character(self):
+        from domain.bible.entities.bible import Bible
+        from domain.bible.entities.character import Character
+        from domain.bible.value_objects.character_id import CharacterId
+
+        bible = Bible(id="bible-1", novel_id=NovelId("novel-1"))
+        bible.add_character(Character(
+            id=CharacterId("char-linyuan"),
+            name="林渊",
+            description="觉醒基因武道系统的主角，行事谨慎，擅长掠夺万物基因强化自身。",
+            role="主角",
+            mental_state="戒备",
+            verbal_tic="说话简短，常先确认代价",
+            idle_behavior="紧张时会按住左腕",
+            core_belief="力量必须服务于活下去",
+            moral_taboos=["不滥杀无辜"],
+            hidden_profile="系统真正来源于旧纪元禁区",
+            reveal_chapter=20,
+        ))
+        return bible
+
+    def test_character_canon_contract_enters_prompt(self, workflow):
+        repo = Mock()
+        repo.get_by_novel_id.return_value = self._bible_with_character()
+        workflow.bible_repository = repo
+        workflow._current_character_canon_contract = workflow._build_character_canon_contract("novel-1", 3)
+
+        prompt = workflow._build_prompt("CTX", "林渊进入训练场", chapter_target_words=2500)
+
+        assert "角色正典锁" in prompt.system
+        assert "林渊" in prompt.system
+        assert "第20章" in prompt.system
+        assert "不得公开揭露" in prompt.system
+
+    def test_character_canon_drift_flags_new_named_character(self, workflow):
+        repo = Mock()
+        repo.get_by_novel_id.return_value = self._bible_with_character()
+        workflow.bible_repository = repo
+
+        annotations = workflow._detect_character_canon_drift(
+            novel_id="novel-1",
+            chapter_number=3,
+            content="林渊按住左腕。赵明站在门口看着他，说这里不欢迎外人。",
+        )
+
+        assert annotations
+        assert annotations[0].type == "character_inconsistency"
+        assert "赵明" in annotations[0].message
+
+    def test_outline_old_protagonist_alias_normalizes_to_bible_name_without_name_specific_rule(self, workflow):
+        repo = Mock()
+        repo.get_by_novel_id.return_value = self._bible_with_character()
+        workflow.bible_repository = repo
+
+        outline = workflow._normalize_outline_against_character_canon(
+            "novel-1",
+            "林舟在裂隙边缘觉醒基因共鸣能力，并决定进入禁区。",
+        )
+
+        assert "林舟" not in outline
+        assert "林渊" in outline
+
+    def test_outline_does_not_replace_non_protagonist_same_surname_character(self, workflow):
+        repo = Mock()
+        repo.get_by_novel_id.return_value = self._bible_with_character()
+        workflow.bible_repository = repo
+
+        outline = workflow._normalize_outline_against_character_canon(
+            "novel-1",
+            "林渊进入训练场。林舟站在门口看着他，说这里不欢迎外人。",
+        )
+
+        assert "林渊进入训练场" in outline
+        assert "林舟站在门口" in outline
+
+    def test_incomplete_chapter_fails_completeness_gate(self, workflow):
+        reasons = workflow._assess_chapter_completeness(
+            content="林渊按住左腕，屏幕上的红光忽然亮起。他刚要开口",
+            target_words=2000,
+        )
+
+        assert reasons
+        assert any("未写完" in reason or "半截" in reason or "篇幅偏短" in reason for reason in reasons)
+
+    def test_first_person_narration_fails_by_default(self, workflow):
+        reasons = workflow._assess_narrative_person(
+            content=(
+                "我站在祠堂末尾，掌心全是汗。\n\n"
+                "司空烈走到我面前，针尖贴住我的脖颈。\n\n"
+                "我听见骨头里传来细碎的断裂声。"
+            ),
+            outline="林渊在家族觉醒仪式上被陷害，坠入血沼洲深渊。",
+        )
+
+        assert reasons
+        assert "第一人称" in reasons[0]
+
+    def test_first_person_allowed_when_outline_requires_it(self, workflow):
+        reasons = workflow._assess_narrative_person(
+            content="我站在祠堂末尾，掌心全是汗。我听见有人喊我的名字。",
+            outline="本章采用第一人称，写林渊在家族觉醒仪式上被陷害。",
+        )
+
+        assert reasons == []
+
+    def test_chapter_task_closure_rejects_new_event_dangling_tail(self, workflow):
+        reasons = workflow._assess_chapter_task_closure(
+            content=(
+                "主角和谈判对象僵持了一整夜，桌上的冷茶换了三次。"
+                "他终于把合同推回去，拒绝交出最后一份证据。"
+                "门外突然传来脚步声，一个陌生人推开门走出。"
+            ),
+            outline="主角在谈判中拒绝交易，并发现幕后还有第三方介入。",
+        )
+
+        assert reasons
+        assert any("阶段性结果" in reason for reason in reasons)
+
+    def test_chapter_task_closure_accepts_result_before_hook(self, workflow):
+        reasons = workflow._assess_chapter_task_closure(
+            content=(
+                "主角和谈判对象僵持了一整夜，桌上的冷茶换了三次。"
+                "他终于把合同推回去，拒绝交出最后一份证据，交易当场破裂。"
+                "门外突然传来脚步声，一个陌生人停在门口，没有再往里走。"
+            ),
+            outline="主角在谈判中拒绝交易，并发现幕后还有第三方介入。",
+        )
+
+        assert reasons == []

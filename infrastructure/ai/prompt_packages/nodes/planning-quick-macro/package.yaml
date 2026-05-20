@@ -8,20 +8,33 @@ tags:
 - 破城槌
 - 商业节奏
 variables:
-- name: premise
-  desc: 故事创意/梗概
-  type: string
 - name: target_chapters
   desc: 目标章节数
   type: number
-- name: worldview
-  desc: 世界观设定
-  type: string
-- name: characters
-  desc: 已有角色
+- name: worldview_context
+  desc: 世界观、人物、关系、地点、时间线的合并上下文；由 ContinuousPlanningService._format_macro_worldview_context 根据 Bible 生成。
   type: string
 - name: depth_instruction
-  desc: 深度指令
+  desc: 根据目标篇幅生成的规划深度指令；决定只规划部卷框架、部分幕，还是完整部/卷/幕。
+  type: string
+  default: ''
+- name: total_recommended_acts
+  desc: 结构计算引擎推荐总幕数。
+  type: number
+- name: recommended_parts
+  desc: 结构计算引擎推荐部数。
+  type: number
+- name: recommended_volumes_per_part
+  desc: 结构计算引擎推荐每部卷数。
+  type: number
+- name: recommended_acts_per_volume
+  desc: 结构计算引擎推荐每卷幕数。
+  type: number
+- name: recommended_chapters_per_act
+  desc: 结构计算引擎推荐每幕章数。
+  type: number
+- name: acts_output_instruction
+  desc: 按 planning_depth 生成的 acts 输出说明；超长篇可只输出部/卷，短中篇输出幕。
   type: string
   default: ''
 id: planning-quick-macro

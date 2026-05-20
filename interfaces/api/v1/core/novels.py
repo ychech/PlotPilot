@@ -9,10 +9,13 @@ from application.world.services.auto_bible_generator import AutoBibleGenerator
 from application.world.services.auto_knowledge_generator import AutoKnowledgeGenerator
 from application.core.dtos.novel_dto import NovelDTO
 from application.core.chapter_target_limits import CHAPTER_TARGET_WORDS_MAX, CHAPTER_TARGET_WORDS_MIN
+from domain.ai.value_objects.prompt import Prompt
+from domain.ai.services.llm_service import GenerationConfig
 from interfaces.api.dependencies import (
     get_novel_service,
     get_auto_bible_generator,
-    get_auto_knowledge_generator
+    get_auto_knowledge_generator,
+    get_llm_service,
 )
 from domain.shared.exceptions import EntityNotFoundError
 
@@ -109,6 +112,32 @@ async def _generate_bible_background(
 
 
 # Routes
+class GenerateTitleRequest(BaseModel):
+    """AI 生成书名请求"""
+    premise: str = Field(..., min_length=10, max_length=2000, description="故事梗概")
+
+
+@router.post("/generate-title")
+async def generate_title(
+    request: GenerateTitleRequest,
+    llm=Depends(get_llm_service),
+):
+    """用 AI 从梗概生成书名"""
+    system = "你是一位资深网文编辑。根据故事梗概起一个简洁有力、吸引读者的书名，不需要书名号，直出书名。"
+    user = f"故事梗概：\n{request.premise}\n\n请为这部小说起一个书名："
+
+    try:
+        result = await llm.generate(
+            Prompt(system=system, user=user),
+            GenerationConfig(max_tokens=60, temperature=0.8),
+        )
+        title = result.content.strip().replace("《", "").replace("》", "").replace("'", "").replace('"', "")
+        return {"title": title}
+    except Exception as e:
+        logger.error("Failed to generate title: %s", e)
+        raise HTTPException(status_code=500, detail=f"书名生成失败: {e}")
+
+
 @router.post("/", response_model=NovelDTO, status_code=201)
 async def create_novel(
     request: CreateNovelRequest,

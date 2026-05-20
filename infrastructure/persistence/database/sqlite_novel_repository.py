@@ -270,11 +270,9 @@ class SqliteNovelRepository(NovelRepository):
         """
         try:
             from infrastructure.persistence.database.query_optimizations import find_novels_with_chapters_optimized
-            from infrastructure.persistence.database.connection import get_connection_pool
 
-            # 使用连接池
-            db_pool = get_connection_pool()
-            return find_novels_with_chapters_optimized(db_pool, status)
+            # 用直连 DatabaseConnection，避开连接池的 WAL 缓存问题
+            return find_novels_with_chapters_optimized(self.db, status)
 
         except Exception as e:
             if is_sqlite_storage_corruption(e):

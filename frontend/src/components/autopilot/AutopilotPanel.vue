@@ -62,7 +62,7 @@
     </section>
 
     <n-alert
-      v-if="statusConnectivityFailures >= 2 && !statusPollDisabled"
+      v-if="statusConnectivityFailures >= 5 && !statusPollDisabled"
       type="warning"
       :show-icon="true"
       class="ap-inline-alert"
@@ -218,9 +218,6 @@
 
     <!-- 操作按钮 -->
     <n-space justify="end" size="small">
-      <n-button v-if="needsReview" type="warning" ghost size="small" :loading="toggling" @click="resume">
-        再次确认 · 继续
-      </n-button>
       <n-button v-if="!isRunning && !needsReview && !needsRecovery" type="primary" size="small" :loading="toggling" @click="openStartModal">
         🚀 启动全托管
       </n-button>
@@ -364,6 +361,8 @@ const statusPollDisabled = ref(false)
 // /status：新请求开始前取消上一轮，减轻后端堆积；序号用于忽略已被替代的 AbortError
 let statusFetchSeq = 0
 let statusLastAbort = null
+const reviewResumeInFlight = ref(false)
+let suppressReviewStatusUntil = 0
 /** 连续无法拉取 /status（网络拒绝/超时）时倍增轮询间隔 */
 const statusConnectivityFailures = ref(0)
 let lastStatusPollIntervalMs = -1
@@ -619,15 +618,20 @@ async function fetchStatus() {
       signal: ac.signal,
     })
     if (res.status === 404) {
-      clearStatusPoll()
+      // 守护进程可能尚未加载小说到共享内存，不退避永久禁用，等下一轮重试
       status.value = null
-      statusPollDisabled.value = true
-      statusConnectivityFailures.value = 0
+      statusConnectivityFailures.value += 1
       return
     }
     if (res.ok) {
       statusConnectivityFailures.value = 0
       const body = await res.json()
+      if (
+        statusNeedsManualReview(body) &&
+        (reviewResumeInFlight.value || Date.now() < suppressReviewStatusUntil)
+      ) {
+        return
+      }
       status.value = body
       emit('status-change', body)
 
@@ -901,6 +905,7 @@ watch(
 
     lastStatusPollIntervalMs = -1
     maybeRestartStatusPollTimer()
+    if (reviewResumeInFlight.value) return
     void fetchStatus()
 
     if (wantsChapterStream()) {
@@ -1076,28 +1081,46 @@ async function stop() {
 }
 
 async function resume() {
-  if (isToggleThrottled()) return
+  if (reviewResumeInFlight.value || toggling.value || isToggleThrottled()) return
+  reviewResumeInFlight.value = true
+  suppressReviewStatusUntil = Date.now() + 6000
+  if (statusLastAbort) {
+    statusLastAbort.abort()
+    statusLastAbort = null
+  }
   // 🔥 乐观更新：立即更新本地状态
   const prevStatus = status.value
+  toggling.value = true
   status.value = {
     ...status.value,
     autopilot_status: 'running',
-    current_stage: 'writing',
+    current_stage: 'syncing',
     needs_review: false,
   }
   emit('status-change', status.value)
   reconnectAttempts = 0
-  message.success('已确认大纲，开始写作')
-  toggling.value = true
+  message.success('已确认大纲，正在恢复托管')
 
   try {
     const res = await fetch(resolveHttpUrl(`${autopilotApiRoot()}/resume`), { method: 'POST' })
+    const body = await res.json().catch(() => ({}))
     if (!res.ok) {
       // 🔥 恢复失败时回滚乐观更新
       status.value = prevStatus
       emit('status-change', prevStatus)
-      const e = await res.json()
-      message.error(e.detail || '恢复失败')
+      message.error(body.detail || '恢复失败')
+      return
+    }
+    const nextStage = body.current_stage || 'writing'
+    status.value = {
+      ...status.value,
+      autopilot_status: 'running',
+      current_stage: nextStage,
+      needs_review: false,
+    }
+    emit('status-change', status.value)
+    if (wantsChapterStream() && !chapterStreamCtrl && !sseReconnecting.value) {
+      startChapterStream()
     }
     void fetchStatus()
   } catch (err) {
@@ -1106,6 +1129,7 @@ async function resume() {
     emit('status-change', prevStatus)
     message.error('恢复请求失败，请重试')
   } finally {
+    reviewResumeInFlight.value = false
     toggling.value = false
   }
 }
@@ -1714,4 +1738,3 @@ onUnmounted(() => {
 .recovery-hint p { margin: 0 0 6px; line-height: 1.5; }
 .recovery-sub { font-size: 11px; opacity: 0.95; margin-bottom: 8px !important; }
 </style>
-

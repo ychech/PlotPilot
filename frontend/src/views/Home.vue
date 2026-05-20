@@ -99,7 +99,13 @@
               <n-grid :cols="2" :x-gap="16" :y-gap="16" responsive="screen">
                 <n-gi>
                   <n-form-item label="书名">
-                    <n-input v-model:value="newBook.title" placeholder="留空则从梗概自动截取" />
+                    <n-space>
+                      <n-input v-model:value="newBook.title" placeholder="留空则 AI 自动生成" style="flex:1" />
+                      <n-button size="small" secondary :loading="generatingTitle" @click="handleGenerateTitle" :disabled="!newBook.premise.trim()">
+                        <template #icon><n-icon><IconSpark /></n-icon></template>
+                        AI 起名
+                      </n-button>
+                    </n-space>
                   </n-form-item>
                 </n-gi>
                 <n-gi>
@@ -468,6 +474,20 @@ const appSettingsShell = useAppSettingsShellStore()
 const createInputRef = ref<any>(null)
 const showAdvanced = ref(false)
 const creating = ref(false)
+
+const generatingTitle = ref(false)
+const handleGenerateTitle = async () => {
+  if (!newBook.value.premise.trim()) return
+  generatingTitle.value = true
+  try {
+    const result = await novelApi.generateTitle({ premise: newBook.value.premise.trim() })
+    newBook.value.title = result.title
+  } catch (e: any) {
+    message.error(e.response?.data?.detail || '书名生成失败')
+  } finally {
+    generatingTitle.value = false
+  }
+}
 const loading = ref(false)
 
 const SIDEBAR_COLLAPSED_KEY = 'plotpilot_sidebar_collapsed'
@@ -623,7 +643,17 @@ const handleCreate = async () => {
 
   creating.value = true
   try {
-    const title = newBook.value.title || newBook.value.premise.substring(0, 20)
+    // 未填书名：自动 AI 生成（失败则用梗概第一词段）
+    let title = newBook.value.title.trim()
+    if (!title) {
+      try {
+        const { title: aiTitle } = await novelApi.generateTitle({ premise: newBook.value.premise.trim() })
+        title = aiTitle || ''
+      } catch {
+        title = newBook.value.premise.split(/[，、。？！\n]/)[0].trim().slice(0, 30)
+      }
+      if (!title) title = '未命名作品'
+    }
     const novelId = `novel-${Date.now()}`
 
     const base = {

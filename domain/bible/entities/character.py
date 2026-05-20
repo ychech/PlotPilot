@@ -18,6 +18,7 @@ class Character(BaseEntity):
         id: CharacterId,
         name: str,
         description: str,
+        role: str = "",
         relationships: List[Any] = None,
         public_profile: str = "",
         hidden_profile: str = "",
@@ -35,6 +36,7 @@ class Character(BaseEntity):
         self.character_id = id
         self.name = name
         self.description = description
+        self.role = role or ""
         self.relationships = relationships or []
         self.public_profile = public_profile
         self.hidden_profile = hidden_profile

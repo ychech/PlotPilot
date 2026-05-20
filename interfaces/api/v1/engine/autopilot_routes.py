@@ -1038,7 +1038,7 @@ def _log_stream_io_tick_sync(
     if not shared or not shared.get("_updated_at"):
         db_novel = novel_repo.get_by_id(NovelId(novel_id))
         if not db_novel:
-            return None, None, None, file_cursor, []
+            return None, None, None, file_cursor, [], []
         novel = db_novel
 
     # 🔥 写作阶段：始终从数据库查询实时统计（缓存只在章节完成时更新）
@@ -1384,6 +1384,13 @@ async def resume_from_review(novel_id: str):
         current_act = shared.get("current_act", 0) or 0
 
         if not _stage_needs_human_review(current_stage_str):
+            if str(shared.get("autopilot_status", "")).lower() == "running":
+                return {
+                    "success": True,
+                    "message": "托管已恢复，无需重复确认",
+                    "current_stage": current_stage_str,
+                    "idempotent": True,
+                }
             raise HTTPException(400, f"当前不在审阅等待状态（当前：{current_stage_str}）")
     else:
         # 降级路径：共享内存无数据，读 DB（在线程池中）
@@ -1395,6 +1402,7 @@ async def resume_from_review(novel_id: str):
             return {
                 "current_stage": n.current_stage.value if hasattr(n.current_stage, 'value') else str(n.current_stage),
                 "current_act": n.current_act or 0,
+                "autopilot_status": n.autopilot_status.value if hasattr(n.autopilot_status, 'value') else str(n.autopilot_status),
             }
 
         try:
@@ -1412,6 +1420,13 @@ async def resume_from_review(novel_id: str):
         current_act = novel_data["current_act"]
 
         if not _stage_needs_human_review(current_stage_str):
+            if str(novel_data.get("autopilot_status", "")).lower() == "running":
+                return {
+                    "success": True,
+                    "message": "托管已恢复，无需重复确认",
+                    "current_stage": current_stage_str,
+                    "idempotent": True,
+                }
             raise HTTPException(400, f"当前不在审阅等待状态（当前：{current_stage_str}）")
 
     # 计算下一阶段
@@ -2512,4 +2527,3 @@ async def debug_all(novel_id: str = None):
         "novel": novel_info,
         "cache_stats": _SHARED_STATE_CACHE.get_stats(),
     }
-

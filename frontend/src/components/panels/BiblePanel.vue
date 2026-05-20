@@ -279,14 +279,13 @@ const fromApiFormat = (bible: any) => {
   return {
     characters: Array.isArray(bible.characters)
       ? bible.characters.map((c: CharacterDTO) => {
-          // Parse description to extract role, traits, arc_note
           const desc = c.description || ''
           const parts = desc.split('\n---\n')
           return {
             name: c.name || '',
-            role: parts[0] || '',
-            traits: parts[1] || '',
-            arc_note: parts[2] || '',
+            role: c.role || '',
+            traits: parts[0] || '',
+            arc_note: parts[1] || '',
           }
         })
       : [],
@@ -307,7 +306,8 @@ const toApiFormat = (data: any) => {
   const characters: CharacterDTO[] = data.characters.map((c: BibleCharacter, i: number) => ({
     id: `char-${i + 1}`,
     name: c.name || '',
-    description: [c.role, c.traits, c.arc_note].filter(Boolean).join('\n---\n'),
+    role: c.role || '',
+    description: [c.traits, c.arc_note].filter(Boolean).join('\n---\n'),
     relationships: [],
   }))
 

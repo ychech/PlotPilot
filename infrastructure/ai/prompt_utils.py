@@ -39,9 +39,11 @@ def get_prompt_system(node_key: str, fallback: str = "") -> str:
         registry = get_prompt_registry()
         system = registry.get_system(node_key)
         if system:
+            logger.info("━━━ Prompt[%s] ━━━ (system) %d chars", node_key, len(system))
             return system
+        logger.warning("━━━ Prompt[%s] ━━━ (system) MISSING, fallback %d chars", node_key, len(fallback))
     except Exception as exc:
-        logger.debug("PromptRegistry unavailable (node_key=%s): %s", node_key, exc)
+        logger.warning("━━━ Prompt[%s] ━━━ (system) ERROR (%s), fallback %d chars", node_key, exc, len(fallback))
 
     return fallback
 
@@ -61,6 +63,7 @@ def get_prompt_user_template(node_key: str, fallback: str = "") -> str:
         registry = get_prompt_registry()
         user_template = registry.get_user_template(node_key)
         if user_template:
+            logger.info("━━━ Prompt[%s] ━━━ (user)   %d chars", node_key, len(user_template))
             return user_template
     except Exception as exc:
         logger.debug("PromptRegistry unavailable (node_key=%s): %s", node_key, exc)

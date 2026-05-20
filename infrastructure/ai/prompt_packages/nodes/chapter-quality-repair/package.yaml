@@ -1,0 +1,55 @@
+name: 章节质量门禁修稿
+category: generation
+source: application/workflows/auto_novel_generation_workflow.py::_repair_chapter_against_quality_gate()
+description: 质量门禁失败后的一次受约束整章修稿模板。修稿必须使用同一上下文，修复一致性、可读性、AI腔、人称误用、章节断尾与覆盖问题，不能另写新剧情。
+builtin: true
+tags:
+- 核心
+- 修稿
+- 质量门禁
+- 一致性
+- 人称修复
+- 章节闭环
+output_format: text
+variables:
+- name: context
+  desc: 与原生成同源的章节上下文，包含 Bible、近期章节、向量召回、FACT_LOCK 等。
+  type: string
+  required: true
+  source: AutoNovelGenerationWorkflow.prepare_chapter_generation.bundle.context
+  token_budget: 32000
+  prompt_role: background_constraints
+- name: outline
+  desc: 本章大纲；修稿时必须保留核心事件顺序和叙事意图。
+  type: string
+  required: true
+  prompt_role: chapter_intent
+- name: character_canon_contract
+  desc: Bible 角色正典锁，包含姓名、身份、关系、心理状态、口癖、习惯动作、隐藏信息揭露限制等。角色一致性问题必须按此修复。
+  type: string
+  required: false
+  source: AutoNovelGenerationWorkflow._build_character_canon_contract
+  prompt_role: character_constraints
+- name: quality_feedback
+  desc: 质量门禁反馈，包含未通过项、AI腔样例、一致性问题和设定冲突。
+  type: string
+  required: true
+  source: AutoNovelGenerationWorkflow._format_quality_repair_brief
+  prompt_role: repair_instructions
+- name: target_words
+  desc: 本章目标字数。
+  type: integer
+  required: true
+  prompt_role: length_control
+- name: min_words
+  desc: 质量门禁计算出的最低可接受字数。
+  type: integer
+  required: true
+  prompt_role: length_control
+- name: original_content
+  desc: 待修订正文；修稿应沿用可用情节，只重写问题段和补足缺漏。
+  type: string
+  required: true
+  prompt_role: draft_to_revise
+id: chapter-quality-repair
+sort_order: 2

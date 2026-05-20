@@ -253,6 +253,7 @@ export type GenerateChapterStreamEvent =
   | { type: 'llm_chunk'; stage: string; text: string }
   | { type: 'beats_generated'; beats: StreamGeneratedBeat[] }
   | { type: 'chunk'; text: string; stats: ChunkStats }
+  | { type: 'quality_gate'; passed: boolean; reasons: string[]; repair_attempted?: boolean; repair_applied?: boolean }
   | { type: 'done'; content: string; consistency_report: ConsistencyReportDTO; token_count: number; output_tokens: number; total_tokens: number; chars: number; style_warnings?: StyleWarning[]; ghost_annotations?: unknown[] }
   | { type: 'error'; message: string }
 
@@ -336,6 +337,15 @@ export async function consumeGenerateChapterStream(
             const ev: GenerateChapterStreamEvent = { type: 'chunk', text, stats: stats || { chars: 0, chunks: 0, estimated_tokens: 0 } }
             handlers.onEvent?.(ev)
             handlers.onChunk?.(text, stats)
+          } else if (typ === 'quality_gate') {
+            const ev: GenerateChapterStreamEvent = {
+              type: 'quality_gate',
+              passed: Boolean(o.passed),
+              reasons: Array.isArray(o.reasons) ? o.reasons.map(String) : [],
+              repair_attempted: Boolean(o.repair_attempted),
+              repair_applied: Boolean(o.repair_applied),
+            }
+            handlers.onEvent?.(ev)
           } else if (typ === 'done') {
             const rawReport = o.consistency_report
             const consistency_report: ConsistencyReportDTO =
@@ -401,6 +411,7 @@ export interface HostedWritePayload {
   to_chapter: number
   auto_save: boolean
   auto_outline: boolean
+  enable_beats?: boolean
 }
 
 /**

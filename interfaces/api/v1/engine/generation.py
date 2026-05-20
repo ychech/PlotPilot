@@ -226,6 +226,10 @@ class HostedWriteStreamRequest(BaseModel):
         True,
         description="是否先用模型生成本章要点大纲（否则用简短模板）",
     )
+    enable_beats: bool = Field(
+        False,
+        description="是否启用节拍拆分生成；默认关闭以优先生成完整章节",
+    )
 
 
 # Endpoints
@@ -310,6 +314,7 @@ async def hosted_write_stream(
             to_chapter=request.to_chapter,
             auto_save=request.auto_save,
             auto_outline=request.auto_outline,
+            enable_beats=request.enable_beats,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 

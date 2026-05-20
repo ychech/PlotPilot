@@ -9,6 +9,13 @@ from application.blueprint.services.continuous_planning_service import (
     _try_parse_parts_from_llm_buffer,
     get_macro_plan_progress,
 )
+from domain.structure.story_node import NodeType
+from infrastructure.ai.prompt_keys import (
+    PLANNING_ACT,
+    PLANNING_MACRO_PRECISE,
+    PLANNING_MACRO_REPAIR,
+    PLANNING_QUICK_MACRO,
+)
 
 
 def _make_service() -> ContinuousPlanningService:
@@ -142,10 +149,128 @@ def test_try_parse_parts_from_llm_buffer_accepts_complete_valid_minimal_json():
     assert parts[0]["volumes"][0]["acts"][0]["title"] == "序幕"
 
 
+def test_quick_macro_prompt_renders_with_cpms_node_variables(monkeypatch):
+    captured = {}
+
+    def fake_render_prompt(node_key, variables, fallback_system="", fallback_user=""):
+        captured["node_key"] = node_key
+        captured["variables"] = variables
+        return {
+            "system": (
+                "目标 {target_chapters} 章，推荐约 {total_recommended_acts} 幕，"
+                "{recommended_parts} 部。{acts_output_instruction}"
+            ).format_map(variables),
+            "user": "{worldview_context}".format_map(variables),
+        }
+
+    monkeypatch.setattr(
+        "application.blueprint.services.continuous_planning_service.render_prompt",
+        fake_render_prompt,
+    )
+
+    svc = _make_service()
+    bible_context = {
+        "worldview": "- 基因武道: 资源会改变阶层",
+        "characters": [{"name": "林渊", "role": "主角", "description": "谨慎求生"}],
+        "locations": [{"name": "裂隙训练场", "description": "高压试炼场"}],
+    }
+
+    prompt = svc._build_quick_macro_prompt(bible_context, 80)
+
+    assert "推荐约" in prompt.system
+    assert "目标 80 章" in prompt.system
+    assert captured["node_key"] == PLANNING_QUICK_MACRO
+    assert captured["variables"]["recommended_parts"] == 1
+    assert captured["variables"]["target_chapters"] == 80
+    assert "worldview_context" not in prompt.user
+    assert "基因武道" in prompt.user
+    assert "林渊" in prompt.user
+    assert "裂隙训练场" in prompt.user
+
+
+def test_precise_macro_and_repair_prompts_render_with_cpms_nodes(monkeypatch):
+    calls = []
+
+    def fake_render_prompt(node_key, variables, fallback_system="", fallback_user=""):
+        calls.append((node_key, variables))
+        return {"system": f"SYS {node_key}", "user": str(variables)}
+
+    monkeypatch.setattr(
+        "application.blueprint.services.continuous_planning_service.render_prompt",
+        fake_render_prompt,
+    )
+
+    svc = _make_service()
+    skeleton = svc._build_precise_structure_skeleton(
+        24,
+        {"parts": 1, "volumes_per_part": 1, "acts_per_volume": 2},
+    )
+    bible_context = {
+        "worldview": "- 基因武道: 资源会改变阶层",
+        "characters": [{"name": "林渊", "role": "主角", "description": "谨慎求生"}],
+    }
+
+    precise = svc._build_precise_macro_prompt(
+        bible_context,
+        24,
+        {"parts": 1, "volumes_per_part": 1, "acts_per_volume": 2},
+        skeleton,
+    )
+    repair = svc._build_precise_repair_prompt(
+        bible_context,
+        24,
+        {"parts": 1, "volumes_per_part": 1, "acts_per_volume": 2},
+        [{"node_id": "A1_1_1", "title": "第一幕", "description": "开局", "missing_fields": ["narrative_goal"]}],
+    )
+
+    assert precise.system == f"SYS {PLANNING_MACRO_PRECISE}"
+    assert repair.system == f"SYS {PLANNING_MACRO_REPAIR}"
+    assert calls[0][0] == PLANNING_MACRO_PRECISE
+    assert "skeleton_block" in calls[0][1]
+    assert "A1_1_1" in calls[0][1]["skeleton_block"]
+    assert calls[1][0] == PLANNING_MACRO_REPAIR
+    assert "incomplete_acts_block" in calls[1][1]
+    assert "narrative_goal" in calls[1][1]["incomplete_acts_block"]
+
+
+def test_act_planning_prompt_renders_with_cpms_node(monkeypatch):
+    captured = {}
+
+    def fake_render_prompt(node_key, variables, fallback_system="", fallback_user=""):
+        captured["node_key"] = node_key
+        captured["variables"] = variables
+        return {"system": "ACT SYS", "user": variables["context"]}
+
+    monkeypatch.setattr(
+        "application.blueprint.services.continuous_planning_service.render_prompt",
+        fake_render_prompt,
+    )
+
+    svc = _make_service()
+    act = Mock()
+    act.title = "裂隙初启"
+    act.description = "主角进入训练场"
+    act.node_type = NodeType.ACT
+    prompt = svc._build_act_planning_prompt(
+        act,
+        {
+            "characters": [{"id": "char-1", "name": "林渊"}],
+            "locations": [{"id": "loc-1", "name": "裂隙训练场"}],
+        },
+        previous_summary="前一幕结束在门外警报响起。",
+        chapter_count=5,
+    )
+
+    assert prompt.system == "ACT SYS"
+    assert captured["node_key"] == PLANNING_ACT
+    assert captured["variables"]["chapter_count"] == 5
+    assert "裂隙初启" in captured["variables"]["context"]
+    assert "林渊" in captured["variables"]["context"]
+
+
 @pytest.mark.asyncio
 async def test_generate_macro_plan_precise_mode_repairs_missing_act_fields_and_rebalances_chapters():
-    llm_service = AsyncMock()
-    llm_service.generate = AsyncMock(side_effect=[
+    responses = [
         """{
           "node_updates": [
             {"node_id": "P1", "title": "寒门燃灯", "description": "寒门少年被卷入京师风暴"},
@@ -185,7 +310,14 @@ async def test_generate_macro_plan_precise_mode_repairs_missing_act_fields_and_r
             }
           ]
         }""",
-    ])
+    ]
+    response_iter = iter(responses)
+
+    async def fake_stream_generate(*args, **kwargs):
+        yield next(response_iter)
+
+    llm_service = Mock()
+    llm_service.stream_generate = fake_stream_generate
     svc = ContinuousPlanningService(
         story_node_repo=Mock(),
         chapter_element_repo=Mock(),
@@ -217,7 +349,6 @@ async def test_generate_macro_plan_precise_mode_repairs_missing_act_fields_and_r
 
     all_acts = [act for volume in parts[0]["volumes"] for act in volume["acts"]]
     assert sum(act["estimated_chapters"] for act in all_acts) == 100
-    assert llm_service.generate.await_count == 2
 
     progress = get_macro_plan_progress("novel-1")
     assert progress["status"] == "completed"

@@ -155,6 +155,21 @@ class ChapterService:
                 return ChapterDTO.from_domain(chapter)
         raise EntityNotFoundError("Chapter", f"{novel_id}/chapter-{chapter_number}")
 
+    def update_chapter_outline_by_novel_and_number(
+        self,
+        novel_id: str,
+        chapter_number: int,
+        outline: str,
+    ) -> Optional[ChapterDTO]:
+        """根据小说 ID 和章节号更新章节大纲。"""
+        chapters = self.chapter_repository.list_by_novel(NovelId(novel_id))
+        for chapter in chapters:
+            if chapter.number == chapter_number:
+                chapter.outline = outline or ""
+                self.chapter_repository.save(chapter)
+                return ChapterDTO.from_domain(chapter)
+        raise EntityNotFoundError("Chapter", f"{novel_id}/chapter-{chapter_number}")
+
     def get_chapter_review(
         self,
         novel_id: str,

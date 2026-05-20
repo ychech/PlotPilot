@@ -71,6 +71,29 @@ class UpdateWorldbuildingRequest(BaseModel):
     daily_life: Optional[DailyLifeDTO] = None
 
 
+def _empty_worldbuilding_response(slug: str) -> dict:
+    """新小说没有世界观数据时返回空结构，避免 404 导致前端报错。"""
+    empty_dim = {
+        "power_system": "", "physics_rules": "", "magic_tech": "",
+    }
+    empty_long = {
+        "power_system": "", "physics_rules": "", "magic_tech": "",
+        "cost_and_limitation": "", "resource_scarcity": "",
+    }
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return {
+        "id": f"wb-{slug}",
+        "novel_id": slug,
+        "core_rules": dict(empty_long),
+        "geography": {"terrain": "", "climate": "", "resources": "", "ecology": ""},
+        "society": {"politics": "", "economy": "", "class_system": ""},
+        "culture": {"history": "", "religion": "", "taboos": ""},
+        "daily_life": {"food_clothing": "", "language_slang": "", "entertainment": ""},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
 @router.get("/{slug}/worldbuilding")
 def get_worldbuilding(
     slug: str,
@@ -89,7 +112,7 @@ def get_worldbuilding(
 
     if wb_entity is None:
         if not worldbuilding_slices_nonempty(bible_slices):
-            raise HTTPException(status_code=404, detail="Worldbuilding not found")
+            return _empty_worldbuilding_response(slug)
 
         display = project_slices_to_legacy_api_shape(bible_slices)
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

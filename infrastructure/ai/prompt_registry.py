@@ -213,6 +213,16 @@ class PromptRegistry:
             logger.warning("节点 %s 的 user prompt 渲染结果为空", node_key)
             return None
 
+        logger.info(
+            "━━━ Prompt[%s] ━━━ vars=%s\n"
+            "  [SYSTEM] (%d chars):\n%s\n"
+            "  [USER]   (%d chars):\n%s\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            node_key,
+            sorted(variables.keys()) if variables else [],
+            len(system), system[-2000:],
+            len(user), user[-2000:],
+        )
         return Prompt(system=system, user=user)
 
     def mock_render(self, node_key: str) -> Optional[RenderResult]:

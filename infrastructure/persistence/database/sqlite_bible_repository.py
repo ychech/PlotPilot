@@ -65,19 +65,20 @@ class SqliteBibleRepository(BibleRepository):
                 pub = getattr(char, "public_profile", None) or ""
                 hid = getattr(char, "hidden_profile", None) or ""
                 rev = getattr(char, "reveal_chapter", None)
+                role = getattr(char, "role", None) or ""
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO bible_characters (
-                        id, novel_id, name, description,
+                        id, novel_id, name, description, role,
                         mental_state, mental_state_reason, verbal_tic, idle_behavior,
                         core_belief, moral_taboos_json, voice_profile_json, active_wounds_json,
                         public_profile, hidden_profile, reveal_chapter,
                         created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        cid, novel_id, char.name, char.description or "",
+                        cid, novel_id, char.name, char.description or "", role,
                         ms, msr, vt, ib,
                         cb, mt_json, vp_json, aw_json,
                         pub, hid, rev,
@@ -224,6 +225,7 @@ class SqliteBibleRepository(BibleRepository):
                     "id": cid,
                     "name": row["name"],
                     "description": row["description"] or "",
+                    "role": row.get("role") or "",
                     "relationships": self._rels_for_character(cid),
                     "mental_state": row.get("mental_state") or "NORMAL",
                     "mental_state_reason": row.get("mental_state_reason") or "",

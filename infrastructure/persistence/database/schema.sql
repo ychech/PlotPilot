@@ -276,6 +276,7 @@ CREATE TABLE IF NOT EXISTS bible_characters (
     novel_id TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT '',
     mental_state TEXT DEFAULT 'NORMAL',
     mental_state_reason TEXT DEFAULT '',
     verbal_tic TEXT DEFAULT '',

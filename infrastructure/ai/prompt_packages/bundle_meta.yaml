@@ -1,6 +1,6 @@
-version: 5.1.0-outline-beat-partition
+version: 5.6.0-chapter-prose-closure
 name: PlotPilot 内置
 description: CPMS v5 统一提示词库 — 全节点中文提示词、统一注册表、消除硬编码
 author: PlotPilot Team
 engine: jinja2
-changelog: 'v5.1: 新增 outline-beat-partition；v5: CPMS统一架构'
+changelog: 'v5.6: 强化正文生成默认第三人称限制视角与章节任务闭环，避免第一人称误用和半章式断尾；v5.5: 抽离 planning-macro-precise / planning-macro-repair，并升级 planning-act 为真实幕级章节规划契约；v5.4: 将 planning-quick-macro 宏观规划主提示词从服务硬编码抽离到 node；v5.3: 强化 knowledge-initial 提示词严格性，禁止推测/多余字段；v5.2: 更新 bible-style-convention 至详细中文版本'

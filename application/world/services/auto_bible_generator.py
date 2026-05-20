@@ -18,6 +18,7 @@ from application.world.worldbuilding_merge import (
 from domain.bible.triple import Triple, SourceType
 from infrastructure.persistence.database.triple_repository import TripleRepository
 from domain.shared.exceptions import EntityNotFoundError
+from domain.novel.value_objects.novel_id import NovelId
 from infrastructure.ai.prompt_keys import (
     BIBLE_ALL, BIBLE_WORLDBUILDING, BIBLE_CHARACTERS, BIBLE_LOCATIONS,
     BIBLE_STYLE_CONVENTION, BIBLE_WORLDBUILDING_DIMENSION, BIBLE_WORLDBUILDING_FIELD,
@@ -131,7 +132,7 @@ _FALLBACK_BIBLE_ALL_SYSTEM = """你是资深网文策划编辑。根据用户提
 要求：
 1. 深入理解故事梗概，提取核心冲突、主题、世界观
 2. 至少 3-5 个主要人物（主角、配角、对手、导师等），确保人物之间有冲突和互动
-3. 每个人物：姓名、定位（主角/配角/对手/导师）、性格特点、目标动机
+3. 每个人物：姓名、定位（主角/配角/对手/导师）、性格特点、目标动机，以及进阶字段（public_profile、hidden_profile、mental_state、verbal_tic、idle_behavior、core_belief、voice_profile）
 4. 至少 2-3 个重要地点，符合故事背景
 5. 明确的文风公约（叙事视角、人称、基调、节奏）
 6. 完整的世界观（5维度框架）：核心法则、地理生态、社会结构、历史文化、沉浸感细节
@@ -157,6 +158,33 @@ _FALLBACK_BIBLE_CHARACTERS_SYSTEM = """你是资深网文策划编辑。基于�
 3. 确保人物之间有冲突和互动
 4. 每个人物：姓名、定位、性格特点、目标动机
 5. 明确定义人物之间的关系（敌对、合作、师徒、亲属、暧昧等）
+6. 每个角色必须填充以下进阶字段：public_profile（公开形象）、hidden_profile（隐秘内核）、mental_state（心理状态枚举）、mental_state_reason（心理状态成因）、verbal_tic（口头禅）、idle_behavior（下意识动作）、core_belief（核心信念）、voice_profile（声线结构JSON对象，含pitch/speed/tone/signature）
+
+JSON 格式：
+{
+  "characters": [
+    {
+      "name": "人物名",
+      "role": "主角/配角/对手/导师",
+      "description": "性格、背景、目标、特点，所有内容在一行内，用逗号分隔",
+      "public_profile": "公开形象：外界看ta是什么样的——社交面具、职业身份、外在性格标签",
+      "hidden_profile": "隐秘内核：不为人知的秘密、创伤、伪装、双重身份",
+      "mental_state": "NORMAL/ANXIOUS/DEPRESSED/RESTLESS/OBSESSIVE/GUILT_RIDDEN/VENGEFUL/HOPEFUL/BROKEN/DETERMINED",
+      "mental_state_reason": "产生当前心理状态的原因，一行描述",
+      "verbal_tic": "口头禅或说话习惯",
+      "idle_behavior": "下意识小动作或待机姿态",
+      "core_belief": "核心信念/价值选择立场",
+      "voice_profile": {"pitch": "中偏低/偏高/低沉", "speed": "快/中速/慢", "tone": "冷淡/热情/慵懒/爽朗/刻薄/温和", "signature": "标志性语言特征"},
+      "relationships": [
+        {
+          "target": "目标人物名",
+          "relation": "关系类型（师徒/敌对/合作/亲属/暧昧等）",
+          "description": "关系的详细描述"
+        }
+      ]
+    }
+  ]
+}
 
 中文姓名（硬性）：
 - 禁用俗套大姓：李、王、张、刘、陈、杨、林、赵、周、吴（不得作为任何主要角色姓氏）。
@@ -623,8 +651,17 @@ class AutoBibleGenerator:
                         novel_id=novel_id,
                         character_id=character_id,
                         name=char_data["name"],
-                        description=f"{char_data['role']} - {char_data['description']}",
-                        relationships=char_data.get("relationships", [])
+                        description=char_data.get("description", ""),
+                        role=char_data.get("role", ""),
+                        relationships=char_data.get("relationships", []),
+                        public_profile=char_data.get("public_profile", ""),
+                        hidden_profile=char_data.get("hidden_profile", ""),
+                        mental_state=char_data.get("mental_state", "NORMAL"),
+                        mental_state_reason=char_data.get("mental_state_reason", ""),
+                        verbal_tic=char_data.get("verbal_tic", ""),
+                        idle_behavior=char_data.get("idle_behavior", ""),
+                        core_belief=char_data.get("core_belief", ""),
+                        voice_profile=char_data.get("voice_profile", {}),
                     )
                     character_ids.append((character_id, char_data))
                     logger.info(f"Character saved: {character_id}")
@@ -839,7 +876,17 @@ JSON 格式（不要有其他文字）：
                     novel_id=novel_id,
                     character_id=character_id,
                     name=char_data["name"],
-                    description=f"{char_data['role']} - {char_data['description']}"
+                    description=char_data.get("description", ""),
+                    role=char_data.get("role", ""),
+                    relationships=char_data.get("relationships", []),
+                    public_profile=char_data.get("public_profile", ""),
+                    hidden_profile=char_data.get("hidden_profile", ""),
+                    mental_state=char_data.get("mental_state", "NORMAL"),
+                    mental_state_reason=char_data.get("mental_state_reason", ""),
+                    verbal_tic=char_data.get("verbal_tic", ""),
+                    idle_behavior=char_data.get("idle_behavior", ""),
+                    core_belief=char_data.get("core_belief", ""),
+                    voice_profile=char_data.get("voice_profile", {}),
                 )
                 logger.info(f"Character saved: {character_id}")
             except Exception as e:
@@ -1090,42 +1137,42 @@ JSON 格式：
         "core_rules": {
             "label": "核心法则",
             "fields": {
-                "power_system": "力量体系/科技树的描述",
-                "physics_rules": "物理规律的特殊之处",
-                "magic_tech": "魔法或科技的运作机制",
+                "power_system": "力量体系/科技树：谁拥有力量（先天血脉/后天修炼/财富购买/科技改造）？力量的上限在哪？不同层级的能力差距有多大？弱者有没有翻盘的可能？",
+                "physics_rules": "物理规律：这个世界与地球物理有什么不同（重力、时间流速、空间结构）？是否存在洞天福地/异次元/虚拟世界？穿越者会感到什么不适？",
+                "magic_tech": "魔法/科技的运作机制：能量从哪来？释放的代价是什么（寿命/记忆/资源/道德）？有没有失控反噬的风险？泛滥还是稀缺？",
             },
         },
         "geography": {
             "label": "地理生态",
             "fields": {
-                "terrain": "主要地形特征",
-                "climate": "气候特点与环境",
-                "resources": "自然资源分布",
-                "ecology": "生态系统与生物链",
+                "terrain": "主要地形：这个世界长什么样（大陆/群岛/地下城/空中浮岛/星际殖民地）？有哪些标志性地标？地形如何塑造了文明的分布和冲突？",
+                "climate": "气候：有没有极端天气（永夜/永昼/酸雨/灵气风暴）？季节如何影响生存和剧情？气候如何塑造了当地人的性格？",
+                "resources": "资源分布：什么资源最值钱（灵石/基因药剂/稀土/信息）？资源集中在谁手里？资源不均引发了什么冲突？",
+                "ecology": "生态与生物链：有什么独特的动植物（妖兽/变异种/机械兽）？它们与人类是什么关系（猎杀/共生/驯化/恐惧）？食物链的顶端是什么？",
             },
         },
         "society": {
             "label": "社会结构",
             "fields": {
-                "politics": "政治体制与权力架构",
-                "economy": "经济模式与贸易",
-                "class_system": "阶级/等级系统",
+                "politics": "政治体制：谁在统治（帝制/议会/宗门/军阀/AI）？权力如何传递（继承/选举/武力夺取/算法指定）？有没有制衡力量？底层有没有上升通道？",
+                "economy": "经济模式：钱从哪来？普通人靠什么活（种田/任务/采集/信息交易）？贫富差距有多大？有没有地下经济/黑市？",
+                "class_system": "阶级系统：社会分几层？阶层之间能不能流动（通过考试/婚姻/战斗/科技）？底层认命还是反抗？上层有什么特权？",
             },
         },
         "culture": {
             "label": "历史文化",
             "fields": {
-                "history": "关键历史事件与时代背景",
-                "religion": "宗教信仰体系",
-                "taboos": "文化禁忌与违逆后果",
+                "history": "关键历史事件：世界怎么变成今天这样的（战争/灾变/发现/背叛）？谁在书写历史——赢家还是被抹去的失败者？有没有被篡改的官方叙事？",
+                "religion": "宗教信仰：人们信什么（神/天道/科学/祖先/AI）？宗教是统治工具还是反抗旗帜？不信的人会怎样？有没有神迹真实发生过？",
+                "taboos": "文化禁忌：什么东西绝对不能碰（亵渎祖先/跨阶级通婚/说出真名/接触异族）？犯禁的人会怎样？这些禁忌背后藏着什么秘密？",
             },
         },
         "daily_life": {
             "label": "沉浸感细节",
             "fields": {
-                "food_clothing": "衣食住行的日常细节",
-                "language_slang": "俚语、口音与方言",
-                "entertainment": "娱乐方式与消遣",
+                "food_clothing": "衣食住行：普通人吃什么、穿什么、住什么？不同阶层的生活差异有多大（把差距写具体）？有什么这个世界独有的日常物品？",
+                "language_slang": "俚语与方言：不同阶层/职业/地区说话有什么不同？有什么这个世界独有的骂人话、口头禅、行话？初次见面怎么打招呼？",
+                "entertainment": "娱乐与消遣：普通人怎么放松（赌场/茶馆/斗兽/虚拟游戏/地下格斗）？什么娱乐是禁忌的？有权势的人玩什么？",
             },
         },
     }

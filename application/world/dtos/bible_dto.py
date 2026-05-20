@@ -24,6 +24,7 @@ class CharacterDTO:
     name: str
     description: str
     relationships: List[Any]
+    role: str = ""
     public_profile: str = ""
     hidden_profile: str = ""
     reveal_chapter: Optional[int] = None
@@ -56,6 +57,7 @@ class CharacterDTO:
             name=character.name,
             description=character.description,
             relationships=character.relationships.copy(),
+            role=getattr(character, "role", None) or "",
             public_profile=getattr(character, 'public_profile', ''),
             hidden_profile=getattr(character, 'hidden_profile', ''),
             reveal_chapter=getattr(character, 'reveal_chapter', None),

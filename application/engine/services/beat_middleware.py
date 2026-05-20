@@ -33,7 +33,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Protocol, Tuple
+from typing import Any, List, Optional, Protocol, Tuple
 
 from application.engine.services.context_builder import Beat
 
@@ -107,10 +107,6 @@ class BeatMiddlewareContext:
                 logger.warning(f"中间件缓存持久化失败 key={key}: {e}")
         self._pending_persist.clear()
         return count
-
-
-# 避免循环导入
-from typing import Any
 
 
 class BeatMiddleware(Protocol):

@@ -91,6 +91,7 @@ class CharacterData(BaseModel):
     id: str = Field(..., description="人物 ID")
     name: str = Field(..., description="人物名称")
     description: str = Field(..., description="人物描述")
+    role: Optional[str] = Field(default=None, description="角色定位（主角/配角/反派等）；省略则保留库中旧值")
     relationships: list[Union[str, BibleCharacterRelationshipItem]] = Field(
         default_factory=list,
         description="关系列表：字符串或结构化对象",
@@ -358,8 +359,8 @@ async def _sse_bible_generator(
                             category="文风公约",
                             content=style_text,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Failed to save style note: %s", e)
             except Exception as e:
                 logger.warning("Style generation failed (non-fatal): %s", e)
 
@@ -453,12 +454,21 @@ async def _sse_bible_generator(
                             novel_id=novel_id,
                             character_id=character_id,
                             name=char_data["name"],
-                            description=f"{char_data.get('role', '')} - {char_data.get('description', '')}",
+                            description=char_data.get("description", ""),
+                            role=char_data.get("role", ""),
                             relationships=char_data.get("relationships", []),
+                            public_profile=char_data.get("public_profile", ""),
+                            hidden_profile=char_data.get("hidden_profile", ""),
+                            mental_state=char_data.get("mental_state", "NORMAL"),
+                            mental_state_reason=char_data.get("mental_state_reason", ""),
+                            verbal_tic=char_data.get("verbal_tic", ""),
+                            idle_behavior=char_data.get("idle_behavior", ""),
+                            core_belief=char_data.get("core_belief", ""),
+                            voice_profile=char_data.get("voice_profile", {}),
                         )
                         character_ids.append((character_id, char_data))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Failed to save character %s: %s", character_id, e)
                 elif item["type"] == "chunk":
                     # 透传 LLM 原始 chunk（前端可用于打字效果）
                     yield _sse_fmt("data", {
@@ -509,8 +519,8 @@ async def _sse_bible_generator(
                                 parent_id=pd.get("parent_id"),
                             )
                             location_ids.append((pd["location_id"], pd))
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning("Failed to save location %s: %s", pd.get("location_id", "?"), e)
                 elif item["type"] == "chunk":
                     yield _sse_fmt("data", {
                         "type": "location_chunk",
@@ -523,23 +533,24 @@ async def _sse_bible_generator(
 
             yield _sse_fmt("phase", {"phase": "locations_done", "message": f"地图生成完成！共 {len(locs_payload)} 个地点"})
 
-        # ── 知识库生成 ──
-        yield _sse_fmt("phase", {"phase": "knowledge", "message": "正在构建知识库..."})
-        await asyncio.sleep(0)
+        # ── 知识库生成（仅全部完成或最后一步时触发，避免中间态知识不完整） ──
+        if stage in ("all", "locations"):
+            yield _sse_fmt("phase", {"phase": "knowledge", "message": "正在构建知识库..."})
+            await asyncio.sleep(0)
 
-        try:
-            bible = bible_generator.bible_service.get_bible_by_novel(novel_id)
-            if bible:
-                chars = bible.characters or []
-                locs = bible.locations or []
-                char_desc = "、".join(f"{c.name}" for c in chars[:5])
-                loc_desc = "、".join(c.name for c in locs[:3])
-                style_notes = bible.style_notes or []
-                style_text = "；".join(n.content for n in style_notes if n.content)
-                bible_summary = f"主要角色：{char_desc}。重要地点：{loc_desc}。文风：{style_text}。"
-                await knowledge_generator.generate_and_save(novel_id, novel.title, bible_summary)
-        except Exception as e:
-            logger.warning("Knowledge generation failed (non-fatal): %s", e)
+            try:
+                bible = bible_generator.bible_service.get_bible_by_novel(novel_id)
+                if bible:
+                    chars = bible.characters or []
+                    locs = bible.locations or []
+                    char_desc = "、".join(f"{c.name}" for c in chars[:5])
+                    loc_desc = "、".join(c.name for c in locs[:3])
+                    style_notes = bible.style_notes or []
+                    style_text = "；".join(n.content for n in style_notes if n.content)
+                    bible_summary = f"主要角色：{char_desc}。重要地点：{loc_desc}。文风：{style_text}。"
+                    await knowledge_generator.generate_and_save(novel_id, novel.title, bible_summary)
+            except Exception as e:
+                logger.warning("Knowledge generation failed (non-fatal): %s", e)
 
         clear_bible_generation_state(novel_id)
         yield _sse_fmt("done", {"message": "全部生成完成！", "novel_id": novel_id})
@@ -550,6 +561,13 @@ async def _sse_bible_generator(
         logger.error(traceback.format_exc())
         record_bible_generation_failure(novel_id, stage, str(e))
         yield _sse_fmt("error", {"message": f"生成失败: {e}"})
+
+
+@router.get("/novels/{novel_id}/generate-stream/")
+@router.get("/novels/{novel_id}/generate-stream")
+async def generate_bible_stream_head(novel_id: str):
+    """HEAD/GET 探活端点：返回 200 表示 SSE 流式接口可用。"""
+    return {"status": "available"}
 
 
 @router.post("/novels/{novel_id}/generate-stream/")

@@ -89,8 +89,6 @@ class SQLiteConnectionPool:
         )
 
         apply_standard_pragmas(conn)
-        # 连接池可适当更频繁 checkpoint，与单连接略区分
-        conn.execute("PRAGMA wal_autocheckpoint=100")
 
         conn.row_factory = sqlite3.Row
 
@@ -118,6 +116,12 @@ class SQLiteConnectionPool:
             if wait_time > 0.1:  # 超过 100ms 记录日志
                 logger.warning(f"获取连接等待时间过长: {wait_time:.3f}s")
 
+            # 清理上一个使用者的残留事务状态
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
             yield conn
 
         except queue.Empty:
@@ -127,6 +131,11 @@ class SQLiteConnectionPool:
         finally:
             # 归还连接
             if conn is not None:
+                # 归还前再次清理，确保连接干净
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 try:
                     self._pool.put(conn, timeout=0.1)
                     self._stats["connections_returned"] += 1

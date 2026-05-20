@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Dict, Optional, TYPE_CHECKING
+from typing import Any, AsyncIterator, Dict, List, Optional, TYPE_CHECKING
 
 from application.core.services.chapter_service import ChapterService
 from application.core.services.novel_service import NovelService
@@ -30,7 +30,13 @@ class HostedWriteService:
         self._novel = novel_service
         self._aftermath = chapter_aftermath_pipeline
 
-    def _schedule_chapter_aftermath(self, novel_id: str, chapter_number: int, content: str) -> None:
+    def _schedule_chapter_aftermath(
+        self,
+        novel_id: str,
+        chapter_number: int,
+        content: str,
+        chapter_micro_beats: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
         """与 HTTP 保存同源：叙事/向量、文风、KG（不阻塞 SSE）；三元组与伏笔在叙事同步单次 LLM 中落库。"""
         if not self._aftermath or not content.strip():
             return
@@ -40,7 +46,12 @@ class HostedWriteService:
                 dto = self._chapter.get_chapter_by_novel_and_number(novel_id, chapter_number)
                 if not dto:
                     return
-                await self._aftermath.run_after_chapter_saved(novel_id, chapter_number, content)
+                await self._aftermath.run_after_chapter_saved(
+                    novel_id,
+                    chapter_number,
+                    content,
+                    chapter_micro_beats=chapter_micro_beats,
+                )
             except Exception as e:
                 logger.warning(
                     "托管章后管线失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
@@ -66,6 +77,7 @@ class HostedWriteService:
         to_chapter: int,
         auto_save: bool = True,
         auto_outline: bool = True,
+        enable_beats: bool = False,
     ) -> AsyncIterator[Dict[str, Any]]:
         """按章节区间连续生成；每章先大纲（LLM 或模板），再复用 generate_chapter_stream。
 
@@ -113,14 +125,23 @@ class HostedWriteService:
                 outline = self._fallback_outline(novel_id, n)
 
             yield {"type": "outline", "chapter": n, "text": outline}
+            try:
+                self._chapter.update_chapter_outline_by_novel_and_number(novel_id, n, outline)
+            except EntityNotFoundError:
+                logger.debug("章节 %s 尚不存在，跳过托管大纲落库", n)
+            except Exception as e:
+                logger.warning("托管大纲落库失败 novel=%s chapter=%s: %s", novel_id, n, e)
 
-            async for ev in self._workflow.generate_chapter_stream(novel_id, n, outline, enable_beats=True):
+            async for ev in self._workflow.generate_chapter_stream(
+                novel_id, n, outline, enable_beats=enable_beats
+            ):
                 merged: Dict[str, Any] = dict(ev)
                 merged["chapter"] = n
                 yield merged
 
                 if ev.get("type") == "done" and auto_save:
                     content = ev.get("content") or ""
+                    beats = ev.get("beats") if isinstance(ev.get("beats"), list) else []
                     logger.info(f"  → 尝试保存章节 {n} ({len(content)} 字符)")
                     try:
                         # 先尝试更新已存在的章节
@@ -128,7 +149,7 @@ class HostedWriteService:
                             novel_id, n, content
                         )
                         logger.info(f"  ✓ 章节 {n} 更新成功")
-                        self._schedule_chapter_aftermath(novel_id, n, content)
+                        self._schedule_chapter_aftermath(novel_id, n, content, beats)
                         yield {"type": "saved", "chapter": n, "ok": True}
                     except EntityNotFoundError as e:
                         # 章节不存在，创建新章节
@@ -144,7 +165,7 @@ class HostedWriteService:
                                 content=content
                             )
                             logger.info(f"  ✓ 章节 {n} 创建成功")
-                            self._schedule_chapter_aftermath(novel_id, n, content)
+                            self._schedule_chapter_aftermath(novel_id, n, content, beats)
                             yield {"type": "saved", "chapter": n, "ok": True, "created": True}
                         except (ValueError, Exception) as create_ex:
                             logger.error(f"  × 创建章节 {n} 失败: {type(create_ex).__name__}: {create_ex}")

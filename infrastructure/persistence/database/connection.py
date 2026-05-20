@@ -237,6 +237,7 @@ def _apply_character_enhancements(conn: sqlite3.Connection) -> None:
     cur = conn.execute("PRAGMA table_info(bible_characters)")
     cols = {row[1] for row in cur.fetchall()}
     migrations = {
+        "role": "ALTER TABLE bible_characters ADD COLUMN role TEXT NOT NULL DEFAULT ''",
         "mental_state": "ALTER TABLE bible_characters ADD COLUMN mental_state TEXT DEFAULT 'NORMAL'",
         "mental_state_reason": "ALTER TABLE bible_characters ADD COLUMN mental_state_reason TEXT DEFAULT ''",
         "verbal_tic": "ALTER TABLE bible_characters ADD COLUMN verbal_tic TEXT DEFAULT ''",

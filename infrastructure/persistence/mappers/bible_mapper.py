@@ -132,6 +132,7 @@ class BibleMapper:
                     id=CharacterId(char_data["id"]),
                     name=char_data["name"],
                     description=char_data["description"],
+                    role=char_data.get("role") or "",
                     relationships=char_data.get("relationships", []),
                     public_profile=char_data.get("public_profile") or "",
                     hidden_profile=char_data.get("hidden_profile") or "",
