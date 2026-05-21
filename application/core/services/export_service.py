@@ -16,6 +16,10 @@ from domain.novel.entities.novel import Novel
 from domain.novel.entities.chapter import Chapter
 from domain.novel.value_objects.novel_id import NovelId
 from domain.novel.value_objects.chapter_id import ChapterId
+from application.audit.services.final_draft_auditor import (
+    audit_export_chapters,
+    iter_body_paragraphs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +45,9 @@ def _chapter_display_title(ch: Chapter) -> str:
 
 
 def _content_to_html_paragraphs(text: str) -> str:
-    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
     parts: List[str] = []
-    for block in raw.split("\n"):
-        line = block.strip()
-        if line:
-            parts.append(f"<p>{html.escape(line)}</p>")
+    for line in iter_body_paragraphs(text or ""):
+        parts.append(f"<p>{html.escape(line)}</p>")
     if not parts:
         return "<p></p>"
     return "\n".join(parts)
@@ -91,6 +92,7 @@ class ExportService:
                 raise ValueError(f"小说不存在: {novel_id}")
             chapters = self.chapter_repository.list_by_novel(NovelId(novel_id))
             chapters.sort(key=lambda x: x.number)
+            self._ensure_exportable(novel, chapters)
             logger.info("导出: %s, 章节数 %s", novel.title, len(chapters))
             if format == "epub":
                 result = self._export_to_epub(novel, chapters)
@@ -120,6 +122,7 @@ class ExportService:
             novel = self.novel_repository.get_by_id(NovelId(novel_id))
             if not novel:
                 raise ValueError(f"小说不存在: {novel_id}")
+            self._ensure_exportable(novel, [chapter])
             if format == "epub":
                 result = self._export_to_epub(novel, [chapter])
             elif format == "pdf":
@@ -142,6 +145,19 @@ class ExportService:
         except Exception as e:
             logger.error("导出章节失败: %s", e, exc_info=True)
             raise
+
+    def _ensure_exportable(self, novel: Novel, chapters: list[Chapter]) -> None:
+        target_words = int(getattr(novel, "target_words_per_chapter", 0) or 0) or None
+        issues = audit_export_chapters(
+            chapters,
+            target_words=target_words,
+            require_completed=True,
+        )
+        if issues:
+            preview = "；".join(issue.message for issue in issues[:5])
+            if len(issues) > 5:
+                preview += f"；另有 {len(issues) - 5} 项"
+            raise ValueError(f"导出被终稿审计拦截：{preview}")
 
     def _export_to_epub(self, novel: Novel, chapters: list[Chapter]) -> Tuple[bytes, str, str]:
         from ebooklib import epub
@@ -282,10 +298,11 @@ class ExportService:
         for ch in chapters:
             doc.add_heading(_chapter_display_title(ch), level=1)
             content = ch.content or ""
-            if not content.strip():
+            paragraphs = iter_body_paragraphs(content)
+            if not paragraphs:
                 doc.add_paragraph("（无正文）")
                 continue
-            for line in content.splitlines():
+            for line in paragraphs:
                 doc.add_paragraph(line)
 
         buf = io.BytesIO()
@@ -311,7 +328,8 @@ class ExportService:
         for ch in chapters:
             lines.append(f"## {_chapter_display_title(ch)}")
             lines.append("")
-            lines.append((ch.content or "").strip() or "（无正文）")
+            body = "\n\n".join(iter_body_paragraphs(ch.content or ""))
+            lines.append(body or "（无正文）")
             lines.append("")
         text = "\n".join(lines)
         stem = _safe_filename_stem(novel.title)

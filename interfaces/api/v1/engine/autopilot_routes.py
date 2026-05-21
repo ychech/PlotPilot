@@ -103,6 +103,20 @@ def _stage_after_review(novel) -> NovelStage:
     return NovelStage.ACT_PLANNING
 
 
+def _read_stage_snapshot_from_db(novel_id: str) -> Optional[Dict[str, Any]]:
+    """轻量读取 novels 状态；用于共享内存可能滞后时校准 start/resume。"""
+    from application.paths import get_db_path
+    from infrastructure.persistence.database.connection import get_database
+
+    row = get_database(get_db_path()).fetch_one(
+        """SELECT current_stage, current_act, current_chapter_in_act,
+                  target_chapters, target_words_per_chapter, autopilot_status
+           FROM novels WHERE id = ?""",
+        (novel_id,),
+    )
+    return dict(row) if row else None
+
+
 def _persist_autopilot_running_sync(
     novel_id: str,
     *,
@@ -434,7 +448,12 @@ def _build_autopilot_status_sync(novel_id: str) -> Optional[Dict[str, Any]]:
 
     # 合并共享内存中的实时状态（如果存在）
     if shared:
-        novel["current_stage"] = shared.get("current_stage", novel.get("current_stage"))
+        db_stage = novel.get("current_stage")
+        shared_stage = shared.get("current_stage")
+        if _stage_needs_human_review(db_stage):
+            novel["current_stage"] = db_stage
+        elif shared_stage:
+            novel["current_stage"] = shared_stage
         novel["audit_progress"] = shared.get("audit_progress", novel.get("audit_progress"))
         novel["last_chapter_tension"] = shared.get("last_chapter_tension", novel.get("last_chapter_tension"))
         novel["last_audit_similarity"] = shared.get("last_audit_similarity", novel.get("last_audit_similarity"))
@@ -689,17 +708,21 @@ def _build_status_with_shared(novel_id: str, shared: Dict[str, Any]) -> Dict[str
             )
 
         row = db.fetch_one(
-            "SELECT target_chapters, target_words_per_chapter, autopilot_status, auto_approve_mode, consecutive_error_count FROM novels WHERE id = ?",
+            """SELECT target_chapters, target_words_per_chapter, autopilot_status,
+                      current_stage, auto_approve_mode, consecutive_error_count
+               FROM novels WHERE id = ?""",
             (novel_id,),
         )
         if row:
             target = row["target_chapters"] or 1
             twpc = row["target_words_per_chapter"] or 2500
             autopilot_status = row["autopilot_status"] or "stopped"
+            db_stage = row["current_stage"] or ""
             auto_approve_mode = bool(row["auto_approve_mode"])
             consecutive_error_count = row["consecutive_error_count"] or 0
         else:
             autopilot_status = "stopped"
+            db_stage = ""
             auto_approve_mode = False
             consecutive_error_count = 0
 
@@ -716,6 +739,7 @@ def _build_status_with_shared(novel_id: str, shared: Dict[str, Any]) -> Dict[str
         in_manuscript_count = shared.get("_cached_manuscript_chapters", 0)
         total_words = shared.get("_cached_total_words", 0)
         current_chapter_number = shared.get("_cached_current_chapter_number")
+        db_stage = ""
 
     # 构建 last_chapter_audit
     lacn = shared.get("last_audit_chapter_number")
@@ -736,7 +760,8 @@ def _build_status_with_shared(novel_id: str, shared: Dict[str, Any]) -> Dict[str
             "issues": shared.get("last_audit_issues", []) or [],
         }
 
-    stage = shared.get("current_stage", "writing")
+    shared_stage = shared.get("current_stage", "writing")
+    stage = db_stage if _stage_needs_human_review(db_stage) else shared_stage
 
     # 🔥 读取守护进程心跳
     daemon_heartbeat = None
@@ -1176,6 +1201,27 @@ async def start_autopilot(novel_id: str, body: StartRequest = StartRequest()):
                 next_stage = NovelStage.ACT_PLANNING.value
         else:
             next_stage = current_stage_str
+
+        # 共享内存可能滞后于 DB（例如宏观规划已落库 paused_for_review，但内存仍是 macro_planning）。
+        # 这里用一次轻量 DB 读校准审阅闸门，避免 start 又把书拉回宏观规划。
+        try:
+            db_snapshot = await asyncio.wait_for(
+                loop.run_in_executor(_SSE_THREAD_POOL, _read_stage_snapshot_from_db, novel_id),
+                timeout=5.0,
+            )
+            if db_snapshot and _stage_needs_human_review(db_snapshot.get("current_stage")):
+                current_stage_str = db_snapshot["current_stage"]
+                current_act = db_snapshot["current_act"] or 0
+                current_chapter_in_act = db_snapshot["current_chapter_in_act"] or 0
+                resolved_tc = int(db_snapshot["target_chapters"] or resolved_tc)
+                resolved_twpc = int(db_snapshot.get("target_words_per_chapter") or resolved_twpc)
+                next_stage = (
+                    NovelStage.WRITING.value
+                    if _has_chapter_nodes_under_current_act(novel_id, current_act)
+                    else NovelStage.ACT_PLANNING.value
+                )
+        except Exception as e:
+            logger.debug("autopilot start DB 阶段校准失败（继续使用共享内存）: %s", e)
     else:
         # ── 降级路径：共享内存无数据，必须读 DB（在线程池中执行）──
         def _start_read_sync():
@@ -1384,14 +1430,29 @@ async def resume_from_review(novel_id: str):
         current_act = shared.get("current_act", 0) or 0
 
         if not _stage_needs_human_review(current_stage_str):
-            if str(shared.get("autopilot_status", "")).lower() == "running":
+            try:
+                db_snapshot = await asyncio.wait_for(
+                    loop.run_in_executor(_SSE_THREAD_POOL, _read_stage_snapshot_from_db, novel_id),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(503, "数据库繁忙，请稍后重试")
+            except Exception as e:
+                logger.debug("autopilot resume DB 阶段校准失败: %s", e)
+                db_snapshot = None
+
+            if db_snapshot and _stage_needs_human_review(db_snapshot.get("current_stage")):
+                current_stage_str = db_snapshot["current_stage"]
+                current_act = db_snapshot["current_act"] or 0
+            elif str(shared.get("autopilot_status", "")).lower() == "running":
                 return {
                     "success": True,
                     "message": "托管已恢复，无需重复确认",
                     "current_stage": current_stage_str,
                     "idempotent": True,
                 }
-            raise HTTPException(400, f"当前不在审阅等待状态（当前：{current_stage_str}）")
+            else:
+                raise HTTPException(400, f"当前不在审阅等待状态（当前：{current_stage_str}）")
     else:
         # 降级路径：共享内存无数据，读 DB（在线程池中）
         def _resume_read_sync():

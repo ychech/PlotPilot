@@ -220,7 +220,8 @@ async def generate_bible(
             await knowledge_generator.generate_and_save(
                 novel_id,
                 novel.title,
-                bible_summary
+                bible_summary,
+                premise=novel.premise or novel.title,
             )
             logger.info(f"Bible and Knowledge generated successfully for {novel_id}")
             clear_bible_generation_state(novel_id)
@@ -548,7 +549,12 @@ async def _sse_bible_generator(
                     style_notes = bible.style_notes or []
                     style_text = "；".join(n.content for n in style_notes if n.content)
                     bible_summary = f"主要角色：{char_desc}。重要地点：{loc_desc}。文风：{style_text}。"
-                    await knowledge_generator.generate_and_save(novel_id, novel.title, bible_summary)
+                    await knowledge_generator.generate_and_save(
+                        novel_id,
+                        novel.title,
+                        bible_summary,
+                        premise=novel.premise or novel.title,
+                    )
             except Exception as e:
                 logger.warning("Knowledge generation failed (non-fatal): %s", e)
 

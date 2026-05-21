@@ -122,6 +122,7 @@ class TestGenerateChapter:
     @pytest.mark.asyncio
     async def test_generate_chapter_success(self, workflow, mock_context_builder, mock_llm_service):
         """测试成功生成章节"""
+        mock_context_builder.magnify_outline_to_beats.return_value = []
         result = await workflow.generate_chapter(
             novel_id="novel-1",
             chapter_number=1,
@@ -151,6 +152,7 @@ class TestGenerateChapter:
     @pytest.mark.asyncio
     async def test_generate_chapter_with_scene_director(self, workflow, mock_context_builder, mock_llm_service):
         """测试使用 scene_director 参数生成章节"""
+        mock_context_builder.magnify_outline_to_beats.return_value = []
         scene_director = SceneDirectorAnalysis(
             characters=["Alice", "Bob"],
             locations=["Room A"],
@@ -240,6 +242,7 @@ class TestGenerateChapterStream:
 
     @pytest.mark.asyncio
     async def test_stream_emits_phases_chunk_and_done(self, workflow):
+        workflow.context_builder.magnify_outline_to_beats.return_value = []
         events = []
         async for e in workflow.generate_chapter_stream("novel-1", 1, "Chapter outline"):
             events.append(e)
@@ -249,6 +252,32 @@ class TestGenerateChapterStream:
         assert events[-1]["type"] == "done"
         assert events[-1]["content"] == "Generated chapter content"
         assert events[-1]["token_count"] == 9250
+
+    def test_chapter_generation_config_prioritizes_output_budget(self, workflow):
+        cfg = workflow._chapter_generation_config(10_000)
+
+        assert cfg.max_tokens >= 30_000
+
+    @pytest.mark.asyncio
+    async def test_generate_chapter_uses_beats_by_default(
+        self,
+        workflow,
+        mock_context_builder,
+        mock_llm_service,
+    ):
+        from application.engine.services.context_builder import Beat
+
+        mock_context_builder.magnify_outline_to_beats.return_value = [
+            Beat(description="开场冲突", target_words=900, focus="dialogue"),
+            Beat(description="阶段结果", target_words=900, focus="action"),
+        ]
+        mock_context_builder.build_beat_prompt.side_effect = lambda beat, i, total: beat.description
+
+        result = await workflow.generate_chapter("novel-1", 1, "Chapter outline")
+
+        assert result.content == "Generated chapter content"
+        assert mock_context_builder.magnify_outline_to_beats.called
+        assert mock_llm_service.generate.call_count >= 2
 
     @pytest.mark.asyncio
     async def test_stream_emits_retrospective_beats_when_beats_disabled(self, workflow):
@@ -760,6 +789,19 @@ class TestQualityGate:
         assert "亲历者" not in combined
         assert "第三人称限制视角" in combined
 
+    def test_prompt_includes_saved_profile_lock(self, workflow):
+        workflow._current_profile_lock = (
+            "【故事内核锁（最高优先级）】\n"
+            "题材/赛道：玄幻\n"
+            "故事内核/梗概承诺：少年偶获神鼎，从此丹武双修，横扫八荒，成就无上神帝。"
+        )
+
+        prompt = workflow._build_prompt("CTX", "测试大纲", chapter_target_words=2000)
+
+        assert "故事内核锁" in prompt.system
+        assert "少年偶获神鼎" in prompt.system
+        assert "丹武双修" in prompt.system
+
     def test_prompt_includes_style_and_theme_constraints(self, workflow):
         theme = Mock()
         theme.build_system_persona.return_value = "【作家风格】高武废土叙述者"
@@ -905,6 +947,31 @@ class TestCharacterCanonGuard:
         assert reasons
         assert any("阶段性结果" in reason for reason in reasons)
 
+    def test_chapter_task_closure_rejects_system_prompt_as_only_ending(self, workflow):
+        reasons = workflow._assess_chapter_task_closure(
+            content=(
+                "林渊冲过废弃训练场，终于把追兵甩进地下通道。"
+                "他按住左腕，还没来得及确认伤口，系统提示忽然亮起。"
+                "【检测到未知基因源，是否立刻吞噬？】"
+            ),
+            outline="林渊摆脱追兵，并在废弃训练场发现未知基因源。",
+        )
+
+        assert reasons
+        assert any("阶段性结果" in reason for reason in reasons)
+
+    def test_chapter_completeness_rejects_action_that_just_starts_at_tail(self, workflow):
+        reasons = workflow._assess_chapter_completeness(
+            content=(
+                "林渊把旧钥匙压进掌心，终于确认禁区入口就在祠堂后墙。"
+                "石门后传来脚步声，他抬手推开门。"
+            ),
+            target_words=200,
+        )
+
+        assert reasons
+        assert any("半截动作" in reason or "突发事件" in reason for reason in reasons)
+
     def test_chapter_task_closure_accepts_result_before_hook(self, workflow):
         reasons = workflow._assess_chapter_task_closure(
             content=(
@@ -916,3 +983,23 @@ class TestCharacterCanonGuard:
         )
 
         assert reasons == []
+
+    def test_quality_gate_rejects_duplicate_paragraphs(self, workflow):
+        gate = workflow._build_quality_gate(
+            content=(
+                "楼道里的灯又坏了两盏。\n"
+                "周虎停止抛卡扣。\n"
+                "小灰烬，我不为难你。\n"
+                "周虎停止抛卡扣。\n"
+                "小灰烬，我不为难你。\n"
+            ),
+            outline="周虎堵住主角，逼他交出防尘网。",
+            target_words=200,
+            style_warnings=[],
+            consistency_report=ConsistencyReport(issues=[], warnings=[], suggestions=[]),
+            ghost_annotations=[],
+        )
+
+        assert gate["passed"] is False
+        assert gate["auto_repair_required"] is True
+        assert any("重复段落" in reason for reason in gate["reasons"])

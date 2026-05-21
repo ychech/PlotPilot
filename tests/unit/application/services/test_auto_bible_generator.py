@@ -114,3 +114,33 @@ def test_prepare_locations_for_save_orders_parents_first_and_downgrades_missing_
     assert by_id["loc_beijing"]["parent_id"] is None
     assert by_id["loc_orphan"]["parent_id"] is None
     assert by_id["loc_chaoyang"]["parent_id"] == "loc_beijing"
+
+
+def test_resolve_profile_premise_prefers_saved_novel_profile(monkeypatch):
+    class FakeDb:
+        def fetch_one(self, _sql, _params):
+            return {
+                "title": "神鼎武帝",
+                "premise": "【类型：玄幻；世界观基调：丹武修行】\n\n少年偶获神鼎，从此丹武双修，横扫八荒，成就无上神帝。",
+                "target_chapters": 120,
+            }
+
+    monkeypatch.setattr(
+        "infrastructure.persistence.database.connection.get_database",
+        lambda: FakeDb(),
+    )
+
+    svc = AutoBibleGenerator(llm_service=Mock(), bible_service=Mock())
+
+    resolved = svc._resolve_profile_premise(
+        novel_id="novel-1",
+        premise="误传标题",
+        title="误传标题",
+        target_chapters=30,
+    )
+
+    assert "故事内核锁" in resolved
+    assert "题材/赛道：玄幻" in resolved
+    assert "世界观基调：丹武修行" in resolved
+    assert "少年偶获神鼎" in resolved
+    assert "误传标题" not in resolved

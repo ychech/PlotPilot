@@ -205,7 +205,15 @@ class BattleTrigger:
         return any(kw in combined for kw in cls.CONFLICT_ESCALATION_KEYWORDS)
 
     @classmethod
-    def get_battle_enhancement_prompt(cls, beat_focus: str = "") -> str:
+    def get_battle_enhancement_prompt(
+        cls,
+        beat_focus: str = "",
+        *,
+        style_summary: str = "",
+        chapter_progress: str = "",
+        beat_index: Optional[int] = None,
+        total_beats: Optional[int] = None,
+    ) -> str:
         """获取战斗增强提示词
 
         Args:
@@ -214,14 +222,47 @@ class BattleTrigger:
         Returns:
             战斗增强提示文本
         """
-        return """【战斗场景增强指导】
-1. 动作分解：将一个回合拆成「起手→出招→碰撞→结果」四拍
-2. 感官层次：视觉（招式形态/光影效果）+ 听觉（破空声/撞击声）+ 触觉（力量反馈/震动）
-3. 节奏控制：快慢交替——密集对攻后穿插喘息/对话/心理活动
-4. 避免流水账：不要逐招列举，抓住2-3个关键招式重点描写
-5. 旁观者视角：穿插围观者的反应来侧面烘托战斗激烈程度
-6. 环境互动：招式对周围环境的影响（地面崩裂/空气震动/物品损坏）
-7. 心理博弈：战斗中的思考、判断、试探、虚招"""
+        phase = "unknown"
+        if beat_index is not None and total_beats:
+            ratio = (beat_index + 1) / max(total_beats, 1)
+            if ratio <= 0.34:
+                phase = "setup"
+            elif ratio >= 0.78:
+                phase = "landing"
+            else:
+                phase = "turn"
+
+        phase_rule = {
+            "setup": "本段偏开局：先写双方站位、旧伤/体力/底牌限制和第一次试探，不急着直接秒杀。",
+            "turn": "本段偏中段：必须出现战局变化，例如破招、换招、代价显现、旁人介入或主角判断修正。",
+            "landing": "本段偏收束：必须写出本轮战斗结果或阶段性代价，可以留下一章钩子，但钩子要落在结果之后。",
+        }.get(phase, "按当前节拍功能决定战斗进展，不要把战斗写成可替换模板。")
+        style_rule = (
+            f"文风对齐：{style_summary[:220]}。打斗句长、用词和镜头距离要贴合这份文风。"
+            if style_summary.strip()
+            else "文风对齐：沿用本章既有叙述腔调，不要突然改成游戏技能播报或说明书。"
+        )
+        progress_rule = (
+            f"进展承接：本章已写到「{chapter_progress[-260:]}」。战斗必须从这个状态继续，别重置站位、伤势、情绪或已亮出的底牌。"
+            if chapter_progress.strip()
+            else "进展承接：根据本章大纲和当前节拍推进战斗，不要脱离章节任务另开一场无关打斗。"
+        )
+        focus_rule = {
+            "power_reveal": "焦点是实力显露：写清底牌如何改变局势，反应要具体到一两个人，不要群体震惊排比。",
+            "martial_arts": "焦点是招式交锋：抓两三个关键动作链，写出拆招和身体代价，不逐招流水账。",
+            "action": "焦点是行动推进：每个动作都要改变距离、伤势、信息或胜负判断。",
+            "emotion": "焦点是情绪爆发：情绪落在手上、步伐、呼吸和选择里，不用长内心独白解释。",
+        }.get(beat_focus, "焦点由当前节拍决定：战斗描写必须服务剧情进展。")
+
+        return (
+            "【动态打斗指导】\n"
+            f"- {style_rule}\n"
+            f"- {progress_rule}\n"
+            f"- {phase_rule}\n"
+            f"- {focus_rule}\n"
+            "- 写法：用「意图→动作→受阻/碰撞→后果」推进。每轮至少带来一个新后果：受伤、失位、暴露底牌、关系变化、线索确认或危机升级。\n"
+            "- 禁止：不要套固定七步模板，不要逐招清单，不要靠「破折号」「不是…而是…」「除了/此外」来解释打斗，不要只写围观者震惊。"
+        )
 
     @classmethod
     def should_inject_battle_skill(
@@ -315,6 +356,10 @@ class ThemeAwarePromptBuilder:
         beat_focus: str,
         chapter_number: int,
         outline: str,
+        style_summary: str = "",
+        chapter_progress: str = "",
+        beat_index: Optional[int] = None,
+        total_beats: Optional[int] = None,
     ) -> str:
         """构建节拍增强提示
 
@@ -331,7 +376,15 @@ class ThemeAwarePromptBuilder:
 
         # 1. 检测是否需要战斗增强
         if BattleTrigger.should_inject_battle_skill(outline, beat_description, beat_focus):
-            parts.append(BattleTrigger.get_battle_enhancement_prompt(beat_focus))
+            parts.append(
+                BattleTrigger.get_battle_enhancement_prompt(
+                    beat_focus,
+                    style_summary=style_summary,
+                    chapter_progress=chapter_progress,
+                    beat_index=beat_index,
+                    total_beats=total_beats,
+                )
+            )
 
         # 2. 调用 Skill 编排器
         if self._orchestrator:
@@ -430,10 +483,21 @@ class ThemeIntegrator:
         beat_focus: str,
         chapter_number: int,
         outline: str,
+        style_summary: str = "",
+        chapter_progress: str = "",
+        beat_index: Optional[int] = None,
+        total_beats: Optional[int] = None,
     ) -> str:
         """构建节拍增强"""
         return self._prompt_builder.build_beat_enhancement(
-            beat_description, beat_focus, chapter_number, outline
+            beat_description,
+            beat_focus,
+            chapter_number,
+            outline,
+            style_summary=style_summary,
+            chapter_progress=chapter_progress,
+            beat_index=beat_index,
+            total_beats=total_beats,
         )
 
     def build_format_rules(self) -> str:

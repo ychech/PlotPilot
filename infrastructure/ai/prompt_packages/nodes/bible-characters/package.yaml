@@ -8,9 +8,18 @@ tags:
 - Bible
 output_format: json
 variables:
-- name: worldbuilding
-  desc: 世界观设定
+- name: premise
+  desc: 故事创意/梗概
   type: string
+  required: true
+- name: target_chapters
+  desc: 目标章节数
+  type: integer
+  required: true
+- name: worldbuilding
+  desc: 世界观设定摘要
+  type: string
+  required: true
 - name: style_guide
   desc: 文风公约
   type: string

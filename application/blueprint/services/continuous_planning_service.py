@@ -28,6 +28,7 @@ from application.blueprint.services.chapter_book_structure_sync import (
     collect_structure_chapter_numbers,
     purge_chapter_book_rows_not_matching_structure,
 )
+from application.core.novel_profile_lock import build_novel_profile_lock
 from infrastructure.ai.prompt_keys import (
     PLANNING_ACT,
     PLANNING_MACRO_PRECISE,
@@ -1687,12 +1688,29 @@ class ContinuousPlanningService:
 
     def _get_bible_context(self, novel_id: str) -> Dict:
         """获取 Bible 上下文"""
+        profile_context: Dict = {}
+        try:
+            from infrastructure.persistence.database.connection import get_database
+
+            row = get_database().fetch_one(
+                "SELECT title, premise, target_chapters FROM novels WHERE id = ?",
+                (novel_id,),
+            )
+            if row:
+                profile_context["profile_lock"] = build_novel_profile_lock(
+                    title=row.get("title") or "",
+                    premise=row.get("premise") or "",
+                    target_chapters=int(row.get("target_chapters") or 0) or None,
+                )
+        except Exception as exc:
+            logger.debug("读取小说建档档案失败 novel=%s: %s", novel_id, exc)
+
         if not self.bible_service:
-            return {}
+            return profile_context
 
         bible = self.bible_service.get_bible_by_novel(novel_id)
         if not bible:
-            return {}
+            return profile_context
 
         # 将 world_settings 格式化为世界观文本块
         worldview_text = ""
@@ -1707,7 +1725,8 @@ class ContinuousPlanningService:
                 worldview_text = "\n".join(lines)
 
         return {
-            "characters": [{"id": c.id, "name": c.name, "description": c.description}
+            **profile_context,
+            "characters": [{"id": c.id, "name": c.name, "role": c.role, "description": c.description}
                            for c in bible.characters],
             "world_settings": [{"id": w.id, "name": w.name, "description": w.description}
                                for w in bible.world_settings],
@@ -2054,6 +2073,13 @@ class ContinuousPlanningService:
     def _format_macro_worldview_context(self, bible_context: Dict) -> str:
         """把 Bible 静态设定整理成宏观规划 node 的输入变量。"""
         context_parts = []
+
+        if bible_context.get("profile_lock"):
+            context_parts.append(
+                f"{bible_context['profile_lock']}\n"
+                "规划硬规则：部、卷、幕、章目标题与简介必须服务上述题材和主角主线；"
+                "不得改成无关题材或替换核心主角承诺。\n"
+            )
 
         if bible_context.get("worldview"):
             context_parts.append(f"【世界观】\n{bible_context['worldview']}\n")

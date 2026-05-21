@@ -170,6 +170,7 @@ def test_quick_macro_prompt_renders_with_cpms_node_variables(monkeypatch):
 
     svc = _make_service()
     bible_context = {
+        "profile_lock": "【故事内核锁（最高优先级）】\n题材/赛道：玄幻\n故事内核/梗概承诺：少年偶获神鼎，从此丹武双修。",
         "worldview": "- 基因武道: 资源会改变阶层",
         "characters": [{"name": "林渊", "role": "主角", "description": "谨慎求生"}],
         "locations": [{"name": "裂隙训练场", "description": "高压试炼场"}],
@@ -186,6 +187,8 @@ def test_quick_macro_prompt_renders_with_cpms_node_variables(monkeypatch):
     assert "基因武道" in prompt.user
     assert "林渊" in prompt.user
     assert "裂隙训练场" in prompt.user
+    assert "故事内核锁" in prompt.user
+    assert "少年偶获神鼎" in prompt.user
 
 
 def test_precise_macro_and_repair_prompts_render_with_cpms_nodes(monkeypatch):

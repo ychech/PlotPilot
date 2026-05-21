@@ -18,5 +18,9 @@ variables:
 - name: genre
   desc: 故事类型
   type: string
+- name: target_chapters
+  desc: 目标章节数
+  type: integer
+  required: true
 id: bible-all
 sort_order: 26

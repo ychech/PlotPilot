@@ -49,3 +49,29 @@ def test_load_node_dir_roundtrip(tmp_path: Path):
 def test_lifecycle_extras_present():
     ex = PACKAGES_ROOT / "nodes" / "lifecycle-phase-directives" / "extras.json"
     assert ex.is_file(), "lifecycle 节点应含 extras.json（_directives）"
+
+
+@pytest.mark.skipif(not (PACKAGES_ROOT / "nodes").is_dir(), reason="no prompt_packages")
+def test_core_generation_prompts_keep_kernel_tags_and_strong_structure():
+    nodes = PACKAGES_ROOT / "nodes"
+
+    bible_system = (nodes / "bible-all" / "system.md").read_text(encoding="utf-8")
+    macro_system = (nodes / "planning-quick-macro" / "system.md").read_text(encoding="utf-8")
+    chapter_system = (nodes / "chapter-generation-main" / "system.md").read_text(encoding="utf-8")
+    chapter_user = (nodes / "chapter-generation-main" / "user.md").read_text(encoding="utf-8")
+    chapter_sync_system = (nodes / "chapter-narrative-sync" / "system.md").read_text(encoding="utf-8")
+    beat_system = (nodes / "outline-beat-partition" / "system.md").read_text(encoding="utf-8")
+
+    assert "内容内核标签" in bible_system
+    assert "叙事功能标签" in bible_system
+    assert "内容标签锁定" in macro_system
+    assert "强叙事结构" in macro_system
+    assert "章节结构卡" in chapter_system
+    assert "最高目标：写出能直接阅读的完整小说正文" in chapter_system
+    assert "一章一推进" in chapter_system
+    assert "承接状态 → 激励事件 → 应对行动 → 阻力升级 → 高潮转折 → 阶段结果 → 钩子" in chapter_system
+    assert "先在心里给本章打标签" in chapter_user
+    assert "本章变化量" in chapter_user
+    assert "章后承接锚点" in chapter_system
+    assert "本章变化量" in chapter_sync_system
+    assert "叙事功能标签" in beat_system

@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Response
 from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field
 import logging
+import re
 
 from application.core.services.novel_service import NovelService
 from application.world.services.auto_bible_generator import AutoBibleGenerator
@@ -11,6 +12,7 @@ from application.core.dtos.novel_dto import NovelDTO
 from application.core.chapter_target_limits import CHAPTER_TARGET_WORDS_MAX, CHAPTER_TARGET_WORDS_MIN
 from domain.ai.value_objects.prompt import Prompt
 from domain.ai.services.llm_service import GenerationConfig
+from application.core.novel_profile_lock import build_story_kernel, suggest_title_from_kernel
 from interfaces.api.dependencies import (
     get_novel_service,
     get_auto_bible_generator,
@@ -83,15 +85,17 @@ async def _generate_bible_background(
     title: str,
     target_chapters: int,
     bible_generator: AutoBibleGenerator,
-    knowledge_generator: AutoKnowledgeGenerator
+    knowledge_generator: AutoKnowledgeGenerator,
+    premise: str = "",
 ):
     """后台任务：生成 Bible 和 Knowledge"""
     bible_summary = ""
     try:
         bible_data = await bible_generator.generate_and_save(
             novel_id,
-            title,
-            target_chapters
+            premise or "",
+            target_chapters,
+            title=title,
         )
         # 构建 Bible 摘要供 Knowledge 生成使用
         chars = bible_data.get("characters", [])
@@ -104,7 +108,8 @@ async def _generate_bible_background(
         await knowledge_generator.generate_and_save(
             novel_id,
             title,
-            bible_summary
+            bible_summary,
+            premise=premise,
         )
         logger.info(f"Bible and Knowledge generated successfully for {novel_id}")
     except Exception as e:
@@ -117,25 +122,65 @@ class GenerateTitleRequest(BaseModel):
     premise: str = Field(..., min_length=10, max_length=2000, description="故事梗概")
 
 
+def _clean_generated_title(raw: str) -> str:
+    """清理模型返回，避免书名号、引号或解释性换行污染标题。"""
+    lines = (raw or "").strip().splitlines()
+    if not lines:
+        return ""
+    title = lines[0].strip()
+    return title.replace("《", "").replace("》", "").replace("'", "").replace('"', "").strip()
+
+
+def _looks_like_premise_not_title(title: str, premise: str) -> bool:
+    """Detect a copied logline masquerading as a book title."""
+    clean_title = (title or "").strip()
+    clean_premise = (premise or "").strip()
+    if not clean_title:
+        return True
+    if len(clean_title) > 16:
+        return True
+    if re.search(r"[，。；！？,.!?;]", clean_title):
+        return True
+    if clean_premise and clean_title == clean_premise:
+        return True
+    return False
+
+
+def _fallback_title_from_premise(premise: str) -> str:
+    """模型不可用时的本地起名兜底：从故事内核生成，不截梗概原句。"""
+    return suggest_title_from_kernel(build_story_kernel(premise=premise))
+
+
 @router.post("/generate-title")
 async def generate_title(
     request: GenerateTitleRequest,
     llm=Depends(get_llm_service),
 ):
     """用 AI 从梗概生成书名"""
-    system = "你是一位资深网文编辑。根据故事梗概起一个简洁有力、吸引读者的书名，不需要书名号，直出书名。"
-    user = f"故事梗概：\n{request.premise}\n\n请为这部小说起一个书名："
+    system = (
+        "你是一位资深网文编辑。根据故事梗概提炼一个简洁有力的网文书名。"
+        "梗概句只是故事内核，不是书名；不得照抄整句梗概，不得输出解释。"
+        "书名控制在2到8个汉字，不需要书名号，直出书名。"
+    )
+    user = f"故事内核/梗概：\n{request.premise}\n\n请从主角承诺、关键物件/资源、题材规则或终局身份中提炼书名："
 
     try:
         result = await llm.generate(
             Prompt(system=system, user=user),
             GenerationConfig(max_tokens=60, temperature=0.8),
         )
-        title = result.content.strip().replace("《", "").replace("》", "").replace("'", "").replace('"', "")
+        title = _clean_generated_title(result.content)
+        if _looks_like_premise_not_title(title, request.premise):
+            raise ValueError("模型返回空标题")
         return {"title": title}
     except Exception as e:
-        logger.error("Failed to generate title: %s", e)
-        raise HTTPException(status_code=500, detail=f"书名生成失败: {e}")
+        fallback_title = _fallback_title_from_premise(request.premise)
+        logger.warning(
+            "Failed to generate title via LLM, using fallback title '%s': %s",
+            fallback_title,
+            e,
+        )
+        return {"title": fallback_title}
 
 
 @router.post("/", response_model=NovelDTO, status_code=201)
@@ -296,7 +341,8 @@ async def generate_bible_alias(
     background_tasks: BackgroundTasks,
     stage: str = "all",
     bible_generator: AutoBibleGenerator = Depends(get_auto_bible_generator),
-    knowledge_generator: AutoKnowledgeGenerator = Depends(get_auto_knowledge_generator)
+    knowledge_generator: AutoKnowledgeGenerator = Depends(get_auto_knowledge_generator),
+    novel_service: NovelService = Depends(get_novel_service),
 ):
     """手动触发 Bible 生成（别名路由，与 POST /bible/novels/{novel_id}/generate 等价）
 
@@ -313,14 +359,28 @@ async def generate_bible_alias(
 
         async def _generate_task():
             try:
+                novel = novel_service.get_novel(novel_id)
+                if not novel:
+                    logger.error("Novel not found for Bible generation alias: %s", novel_id)
+                    return
                 bible_data = await bible_generator.generate_and_save(
                     novel_id=novel_id,
+                    premise=novel.premise or novel.title,
+                    target_chapters=novel.target_chapters,
+                    title=novel.title,
                     stage=stage
                 )
                 if knowledge_generator and stage in ("all", "worldbuilding"):
+                    chars = bible_data.get("characters", [])
+                    locs = bible_data.get("locations", [])
+                    char_desc = "、".join(f"{c.get('name', '')}（{c.get('role', '')}）" for c in chars[:5])
+                    loc_desc = "、".join(l.get("name", "") for l in locs[:3])
+                    bible_summary = f"主要角色：{char_desc}。重要地点：{loc_desc}。文风：{bible_data.get('style', '')}。"
                     await knowledge_generator.generate_and_save(
                         novel_id=novel_id,
-                        bible_data=bible_data
+                        title=novel.title,
+                        bible_summary=bible_summary,
+                        premise=novel.premise or novel.title,
                     )
             except Exception as e:
                 logger.error(f"Failed to generate Bible/Knowledge for {novel_id}: {e}")

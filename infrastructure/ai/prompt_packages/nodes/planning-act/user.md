@@ -32,11 +32,11 @@
     {{
       "number": 1,
       "title": "章节标题",
-      "outline": "章节大纲（100-200字，必须描述爽点的具体内容）",
+      "outline": "章节大纲（100-200字，必须包含叙事功能标签、承接点、核心冲突、主角行动、阻力升级、阶段结果、下一章钩子）",
       "characters": ["人物ID"],
       "locations": ["地点ID"],
       "thrill_type": "power_reveal",
-      "thrill_description": "爽点描述：主角在什么场景下展露了什么实力/身份，旁观者如何反应",
+      "thrill_description": "爽点描述：主角在什么场景下展露了什么实力/身份，局势如何改变，旁观者/对手如何产生具体反应",
       "foreshadow_action": "plant",
       "foreshadow_detail": "伏笔细节：种下/回收了什么伏笔"
     }}

@@ -22,7 +22,7 @@
               "estimated_chapters": 预估章数,
               "core_conflict": "主角 vs 反派，赌注是...",
               "emotional_turn": "从...到...",
-              "description": "情节摘要...",
+              "description": "情节摘要；必须包含：内容标签、激励事件、升级过程、高潮转折、阶段结果、下一幕钩子",
               "key_characters": ["角色1", "角色2"],
               "key_locations": ["地点1"]
             }}

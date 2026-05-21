@@ -10,8 +10,12 @@
 import time
 import logging
 import asyncio
+import os
+import re
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 from domain.novel.entities.novel import Novel, NovelStage, AutopilotStatus
@@ -33,6 +37,7 @@ from domain.novel.value_objects.chapter_id import ChapterId
 from domain.novel.value_objects.word_count import WordCount
 from domain.novel.value_objects.generation_preferences import GenerationPreferences
 from domain.structure.story_node import StoryNode
+from application.core.premise_genre_world import parse_genre_world_from_premise
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +54,7 @@ def _coerce_word_count_to_int(wc: Any) -> int:
 VOICE_REWRITE_MAX_ATTEMPTS = LLM_MAX_TOTAL_ATTEMPTS
 VOICE_REWRITE_THRESHOLD = 0.68
 VOICE_WARNING_THRESHOLD_FALLBACK = 0.75
+AUTOPILOT_PROCESS_LOCK_TTL_SECONDS = 30 * 60
 
 
 class AutopilotDaemon:
@@ -94,6 +100,7 @@ class AutopilotDaemon:
 
         #: 本章写作阶段产生的 Beat 快照，供章后叙事同步写入 micro_beats（非章纲句读切分）
         self._pending_chapter_micro_beats: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
+        self._process_owner = f"pid:{os.getpid()}:{id(self)}"
 
         # 惰性初始化 VolumeSummaryService
         if not self.volume_summary_service and llm_service and story_node_repo:
@@ -104,6 +111,81 @@ class AutopilotDaemon:
                 chapter_repository=chapter_repository,
                 foreshadowing_repository=foreshadowing_repository,
             )
+
+    def _try_acquire_process_lock(self, novel_id: str) -> bool:
+        """跨守护进程防重：同一本书任一时刻只能被一个 daemon 处理。"""
+        from application.paths import get_db_path
+        from infrastructure.persistence.database.sqlite_pragmas import apply_standard_pragmas
+
+        now = time.time()
+        stale_before = now - AUTOPILOT_PROCESS_LOCK_TTL_SECONDS
+        conn = sqlite3.connect(get_db_path(), timeout=2.0)
+        try:
+            apply_standard_pragmas(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS autopilot_process_locks (
+                    novel_id TEXT PRIMARY KEY,
+                    owner TEXT NOT NULL,
+                    acquired_at REAL NOT NULL,
+                    heartbeat_at REAL NOT NULL
+                )"""
+            )
+            conn.execute(
+                "DELETE FROM autopilot_process_locks WHERE heartbeat_at < ?",
+                (stale_before,),
+            )
+            conn.execute(
+                """INSERT OR IGNORE INTO autopilot_process_locks
+                   (novel_id, owner, acquired_at, heartbeat_at)
+                   VALUES (?, ?, ?, ?)""",
+                (novel_id, self._process_owner, now, now),
+            )
+            row = conn.execute(
+                "SELECT owner FROM autopilot_process_locks WHERE novel_id = ?",
+                (novel_id,),
+            ).fetchone()
+            acquired = bool(row and row[0] == self._process_owner)
+            conn.commit()
+            if not acquired:
+                logger.info("[%s] 已有守护进程正在处理，跳过本轮", novel_id)
+            return acquired
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("[%s] 获取自动驾驶处理锁失败，跳过本轮: %s", novel_id, exc)
+            return False
+        finally:
+            conn.close()
+
+    def _release_process_lock(self, novel_id: str) -> None:
+        """释放跨守护进程处理锁。"""
+        from application.paths import get_db_path
+        from infrastructure.persistence.database.sqlite_pragmas import apply_standard_pragmas
+
+        conn = sqlite3.connect(get_db_path(), timeout=2.0)
+        try:
+            apply_standard_pragmas(conn)
+            conn.execute(
+                "DELETE FROM autopilot_process_locks WHERE novel_id = ? AND owner = ?",
+                (novel_id, self._process_owner),
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.debug("[%s] 释放自动驾驶处理锁失败（可忽略）: %s", novel_id, exc)
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _process_lock(self, novel_id: str):
+        acquired = self._try_acquire_process_lock(novel_id)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self._release_process_lock(novel_id)
 
     def _push_persistence_command(self, command_type: str, payload: Dict) -> bool:
         """推送持久化命令到队列（CQRS 单一写入者模式）
@@ -1055,6 +1137,14 @@ class AutopilotDaemon:
 
     async def _process_novel(self, novel: Novel):
         """处理单个小说（全流程）"""
+        novel_id_for_lock = novel.novel_id.value
+        with self._process_lock(novel_id_for_lock) as acquired:
+            if not acquired:
+                return
+            await self._process_novel_locked(novel)
+
+    async def _process_novel_locked(self, novel: Novel):
+        """已持有跨进程处理锁的单本小说处理流程。"""
         try:
             # 🔥 二次防线：处理小说前再次清理残留停止信号
             # 场景：_cleanup_stale_stop_signals 和此处之间可能有新的 stop→start 事件
@@ -1509,6 +1599,13 @@ class AutopilotDaemon:
             )
 
         target_word_count = int(getattr(novel, "target_words_per_chapter", None) or 2500)
+        if self.chapter_workflow:
+            try:
+                genre, _world = parse_genre_world_from_premise(getattr(novel, "premise", "") or "")
+                if genre:
+                    self.chapter_workflow.set_genre(genre)
+            except Exception as exc:
+                logger.debug("[%s] 题材规则初始化失败: %s", novel.novel_id.value, exc)
         logger.info(f"[{novel.novel_id}] 📖 开始写第 {chapter_num} 章：{outline[:60]}...")
         logger.info(f"[{novel.novel_id}]    进度: {current_chapters}/{target_chapters} 章（目标 {target_word_count} 字/章）")
 
@@ -1746,9 +1843,31 @@ class AutopilotDaemon:
                     f"不提前结章，继续节拍循环"
                 )
             else:
+                closure_reasons = self._assess_chapter_final_closure(
+                    existing_content, outline, target_word_count
+                )
+                if closure_reasons:
+                    existing_content, closure_ok = await self._repair_chapter_final_closure(
+                        novel=novel,
+                        chapter_num=chapter_num,
+                        outline=outline,
+                        content=existing_content,
+                        reasons=closure_reasons,
+                    )
+                    if not closure_ok:
+                        await self._upsert_chapter_content(
+                            novel, next_chapter_node, existing_content, status="draft"
+                        )
+                        self._flush_novel(novel)
+                        logger.warning(
+                            f"[{novel.novel_id}] 第 {chapter_num} 章已有正文但结尾未闭环，"
+                            f"保持 draft：{'; '.join(closure_reasons)}"
+                        )
+                        return
+
                 logger.info(
                     f"[{novel.novel_id}] 章节 {chapter_num} 已有 {len(existing_content)} 字 "
-                    f"(达标 {int(len(existing_content) / target_word_count * 100)}%)，直接标记完成"
+                    f"(达标 {int(len(existing_content) / target_word_count * 100)}%)，结尾闭环后标记完成"
                 )
                 await self._upsert_chapter_content(
                     novel, next_chapter_node, existing_content, status="completed"
@@ -1941,7 +2060,7 @@ class AutopilotDaemon:
                         voice_anchors=voice_anchors,
                         chapter_draft_so_far=accumulated_content,
                     )
-                    max_tokens = int(adjusted_target * 1.3)  # 使用调整后的目标
+                    max_tokens = max(4096, min(120000, int(adjusted_target * 3.2) + 1200))
                     cfg = GenerationConfig(max_tokens=max_tokens, temperature=0.85)
                     beat_content = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel)
                 else:
@@ -2166,7 +2285,6 @@ class AutopilotDaemon:
         beats_completion_ratio = beats_completed_count / max(total_beats_count, 1)
 
         # 检测内容是否完整（以句号等结束符结尾）
-        import re
         ending_pattern = r'[。！？…）】》"\'』」]$'
         content_complete = bool(re.search(ending_pattern, chapter_content.strip()))
 
@@ -2305,6 +2423,31 @@ class AutopilotDaemon:
             self._flush_novel(novel)
             return
 
+        closure_reasons = self._assess_chapter_final_closure(
+            chapter_content, outline, target_word_count
+        )
+        if closure_reasons:
+            chapter_content, closure_ok = await self._repair_chapter_final_closure(
+                novel=novel,
+                chapter_num=chapter_num,
+                outline=outline,
+                content=chapter_content,
+                reasons=closure_reasons,
+            )
+            if not closure_ok:
+                await self._upsert_chapter_content(
+                    novel, next_chapter_node, chapter_content, status="draft"
+                )
+                novel.beats_completed = True
+                novel.current_beat_index = total_beats_count
+                self._flush_novel(novel)
+                logger.warning(
+                    f"[{novel.novel_id}] ⚠️ 第 {chapter_num} 章结尾未形成正常章节收束，"
+                    f"不标记 completed：{'; '.join(closure_reasons)}"
+                )
+                return
+            actual_word_count = len(chapter_content.strip())
+
         # 8. 更新计数器，重置节拍状态
         novel.current_auto_chapters = (novel.current_auto_chapters or 0) + 1
         novel.current_chapter_in_act += 1
@@ -2403,6 +2546,168 @@ class AutopilotDaemon:
             f"[{novel.novel_id}] 🎉 第 {chapter_num} 章完成：{actual_word_count} 字 "
             f"(目标 {target_word_count} 字，共 {novel.current_auto_chapters}/{novel.target_chapters} 章)"
         )
+
+    def _assess_chapter_final_closure(
+        self,
+        content: str,
+        outline: str,
+        target_words: int,
+    ) -> List[str]:
+        """落库 completed 前检查章末是否是正常章节结尾，而不是片段截断。"""
+        text = (content or "").strip()
+        if not text:
+            return ["正文为空"]
+
+        if self.chapter_workflow:
+            reasons: List[str] = []
+            try:
+                completeness = self.chapter_workflow._assess_chapter_completeness(
+                    content=text,
+                    target_words=target_words,
+                )
+                # 字数门槛在 _handle_writing 已判定；这里专注章节结尾是否闭合。
+                reasons.extend(
+                    reason for reason in completeness if "篇幅偏短" not in str(reason)
+                )
+                reasons.extend(
+                    self.chapter_workflow._assess_chapter_task_closure(
+                        content=text,
+                        outline=outline,
+                    )
+                )
+                return list(dict.fromkeys(reasons))
+            except Exception as e:
+                logger.debug("章节结尾闭环检查调用 workflow 失败，使用本地降级规则: %s", e)
+
+        import re
+
+        reasons = []
+        tail = text[-560:]
+        if not re.search(r'[。！？…）】》"\'』」]$', text):
+            reasons.append("章节结尾疑似句子未写完")
+        if text.count("“") != text.count("”") or text.count("「") != text.count("」"):
+            reasons.append("章节结尾疑似对白未闭合")
+
+        result_pattern = (
+            r"(确认|证实|完成|结束|落定|恢复|明白|看清|认出|拿到|失去|付出|代价|结果|失败|成功|"
+            r"逃出|被困|翻脸|和解|成交|破裂|拒绝|答应|决定|选择|交出|保住|毁掉|暴露|揭穿|"
+            r"解决|升级|退去|停下|停住|放弃|承认|签下|达成|崩塌|熄灭)"
+        )
+        landed_hook_pattern = (
+            r"(停在|停住|没有再|不再|只剩下|落下|暗下去|合上|关上|收回|散去|定住|归于|"
+            r"压低|扣住|放下|留下|退后|走远|熄灭|沉下去|安静下来)"
+        )
+        inciting_tail = re.search(
+            r"(?:(?:新|陌生|另一|第二|第三)[^。！？]{0,40})?"
+            r"(?:人|声音|脚步|提示|警报|文字|符号|影子|名字|信息|画面|物件|信号|亮光|异动|变化|轮廓)"
+            r"[^。！？]{0,80}(?:出现|浮现|亮起|响起|传来|推开|走出|伸出|震动|裂开|靠近|弹出|刷新|停下)"
+            r"|(?:身后|门外|耳边|屏幕|墙上|地面|水面|镜中|裂缝|阴影|光里|雾里|远处)"
+            r"[^。！？]{0,80}(?:出现|浮现|亮起|响起|传来|推开|走出|伸出|震动|裂开|靠近|弹出|刷新|停下)",
+            tail,
+        )
+        if inciting_tail:
+            before_new_event = tail[:inciting_tail.start()]
+            after_new_event = tail[inciting_tail.end():]
+            new_event_text = tail[inciting_tail.start():]
+            has_result_before = bool(re.search(result_pattern, before_new_event))
+            has_result_after = bool(re.search(result_pattern, after_new_event))
+            hook_has_landing_image = bool(re.search(landed_hook_pattern, new_event_text[-160:]))
+            if not has_result_after and not (has_result_before and hook_has_landing_image):
+                reasons.append("章节结尾停在新事件刚出现的位置，缺少阶段性结果")
+        return list(dict.fromkeys(reasons))
+
+    async def _repair_chapter_final_closure(
+        self,
+        *,
+        novel: Novel,
+        chapter_num: int,
+        outline: str,
+        content: str,
+        reasons: List[str],
+    ) -> Tuple[str, bool]:
+        """章末闭环定向修复：只补最后落点，不跳过后续审计。"""
+        text = (content or "").strip()
+        if not text:
+            return content, False
+
+        if not self._is_still_running(novel):
+            return content, False
+
+        # 纯截断问题先尝试截到最近完整句，避免为了补标点额外发起 LLM。
+        reason_text = "；".join(str(r) for r in reasons)
+        if "阶段性结果" not in reason_text and (
+            "未写完" in reason_text or "对白未闭合" in reason_text
+        ):
+            closed = self._fallback_close_sentence(text)
+            if not self._assess_chapter_final_closure(
+                closed,
+                outline,
+                max(1, len(closed)),
+            ):
+                return closed, True
+
+        logger.info(
+            "[%s] 第 %s 章触发章末闭环修复：%s",
+            novel.novel_id.value,
+            chapter_num,
+            reason_text,
+        )
+        self._update_shared_state(
+            novel.novel_id.value,
+            writing_substep="ending_closure_repair",
+            writing_substep_label="章节结尾闭环修复",
+        )
+
+        tail = text[-1400:]
+        prompt = Prompt(
+            system=(
+                "你是网络小说章节收尾修复编辑。你只负责给现有章节补一个自然结尾，"
+                "不能重写前文，不能新增与大纲冲突的设定，不能输出解释。"
+            ),
+            user=(
+                "下面这章已经写到末尾，但结尾未形成正常章节收束。\n\n"
+                f"【本章大纲】\n{outline}\n\n"
+                f"【未通过原因】\n{reason_text}\n\n"
+                f"【章节末尾】\n{tail}\n\n"
+                "请只输出要追加在原文后面的续写段落，220-520字。\n"
+                "要求：\n"
+                "1. 先让本章核心事件完成阶段性结果：信息确认、目标成败、代价显现、角色选择、关系变化、危机解决或危机升级，至少满足一种。\n"
+                "2. 可以保留下一章钩子，但钩子必须落在本章结果之后。\n"
+                "3. 不要停在刚开口、门刚开、提示刚亮、异象刚发生、动作刚开始的位置。\n"
+                "4. 用动作、对白或画面收束，不要写标题，不要解释。"
+            ),
+        )
+
+        try:
+            cfg = GenerationConfig(max_tokens=900, temperature=0.72)
+            result = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel)
+            addition = strip_reasoning_artifacts(result or "").strip()
+            addition = re.sub(r"^(续写段落|追加内容|结尾修复)[:：]\s*", "", addition).strip()
+            if not addition:
+                return content, False
+            repaired = f"{text}\n\n{addition}"
+            repaired_reasons = self._assess_chapter_final_closure(
+                repaired,
+                outline,
+                max(1, len(repaired)),
+            )
+            if repaired_reasons:
+                logger.warning(
+                    "[%s] 第 %s 章章末闭环修复后仍未通过：%s",
+                    novel.novel_id.value,
+                    chapter_num,
+                    "; ".join(repaired_reasons),
+                )
+                return repaired, False
+            return repaired, True
+        except Exception as e:
+            logger.warning(
+                "[%s] 第 %s 章章末闭环修复失败：%s",
+                novel.novel_id.value,
+                chapter_num,
+                e,
+            )
+            return content, False
 
     @staticmethod
     def _beats_to_planned_micro_beats(beats: List[Any]) -> List[Dict[str, Any]]:
@@ -3710,9 +4015,9 @@ class AutopilotDaemon:
             emotion_guide = (
                 "\n---情绪方向指示---\n"
                 "当前叙事情绪正在上升或达到高潮。续写时：\n"
-                "- 用动作残影、未完的话语、或省略号收尾，保留叙事势能\n"
-                "- 不要用句号「杀死」正在上升的张力——用破折号或省略号更好\n"
-                "- 如果是战斗/对峙场景，留下一个未落下的动作\n"
+                "- 用一个明确后果保留叙事势能，例如伤势、失位、底牌暴露、关系变化或危机升级\n"
+                "- 不要用破折号、省略号、未完对白或未落下动作假装钩子\n"
+                "- 如果是战斗/对峙场景，必须让本轮动作落到结果，再把更大的压力压到下一段\n"
             )
         else:
             emotion_guide = (
@@ -3860,7 +4165,11 @@ class AutopilotDaemon:
         user_parts.append("\n\n开始撰写：")
 
         # 字数控制策略（与主流程一致）
-        max_tokens = int(beat.target_words * 1.3) if beat else 3000
+        max_tokens = (
+            max(4096, min(120000, int(beat.target_words * 3.2) + 1200))
+            if beat
+            else 4096
+        )
 
         prompt = Prompt(system=system, user="\n".join(user_parts))
         config = GenerationConfig(max_tokens=max_tokens, temperature=0.85)
@@ -4178,4 +4487,3 @@ class AutopilotDaemon:
         
         except Exception as e:
             logger.warning(f"[{novel.novel_id}] 摘要生成失败: {e}")
-

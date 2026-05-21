@@ -18,6 +18,7 @@ from domain.novel.value_objects.tension_level import TensionLevel
 
 
 async def _mock_generate_chapter_stream(*args, **kwargs):
+    _mock_generate_chapter_stream.last_kwargs = kwargs
     yield {"type": "phase", "phase": "planning"}
     yield {"type": "chunk", "text": "x"}
     yield {
@@ -29,6 +30,7 @@ async def _mock_generate_chapter_stream(*args, **kwargs):
 
 
 async def _mock_hosted_stream(*args, **kwargs):
+    _mock_hosted_stream.last_kwargs = kwargs
     yield {
         "type": "session",
         "novel_id": "novel-1",
@@ -163,6 +165,7 @@ class TestGenerateChapterEndpoint:
         body = response.text
         assert "data:" in body
         assert '"type": "done"' in body or '"done"' in body
+        assert _mock_generate_chapter_stream.last_kwargs["enable_beats"] is True
 
     def test_hosted_write_stream_sse(self, client):
         """托管连写 SSE"""
@@ -178,6 +181,7 @@ class TestGenerateChapterEndpoint:
         assert response.status_code == 200
         assert "event-stream" in response.headers.get("content-type", "")
         assert "session" in response.text
+        assert _mock_hosted_stream.last_kwargs["enable_beats"] is True
 
 
 class TestStorylineEndpoints:
@@ -247,4 +251,3 @@ class TestPlotArcEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "key_points" in data
-

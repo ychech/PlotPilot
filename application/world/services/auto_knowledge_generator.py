@@ -8,6 +8,7 @@ from application.ai.knowledge_llm_contract import (
     parse_initial_knowledge_llm_response,
     to_knowledge_service_update_dict,
 )
+from application.core.novel_profile_lock import build_novel_profile_lock
 from application.world.services.knowledge_service import KnowledgeService
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,8 @@ class AutoKnowledgeGenerator:
         self,
         novel_id: str,
         title: str,
-        bible_summary: str = ""
+        bible_summary: str = "",
+        premise: str = "",
     ) -> Dict[str, Any]:
         """生成并保存初始 Knowledge
 
@@ -43,7 +45,14 @@ class AutoKnowledgeGenerator:
         """
         logger.info(f"AutoKnowledgeGenerator: generating knowledge for novel '{title}' ({novel_id})")
 
-        knowledge_data = await self._generate_knowledge_data(title, bible_summary)
+        profile_lock = self._resolve_profile_lock(
+            novel_id=novel_id,
+            title=title,
+            premise=premise,
+        )
+        knowledge_data = await self._generate_knowledge_data(title, bible_summary, profile_lock)
+        if profile_lock and not (knowledge_data.get("premise_lock") or "").strip():
+            knowledge_data["premise_lock"] = profile_lock
 
         self._save_to_knowledge(novel_id, knowledge_data)
 
@@ -53,10 +62,39 @@ class AutoKnowledgeGenerator:
         )
         return knowledge_data
 
-    async def _generate_knowledge_data(self, title: str, bible_summary: str) -> Dict[str, Any]:
+    def _resolve_profile_lock(self, *, novel_id: str, title: str = "", premise: str = "") -> str:
+        try:
+            from infrastructure.persistence.database.connection import get_database
+
+            row = get_database().fetch_one(
+                "SELECT title, premise, target_chapters FROM novels WHERE id = ?",
+                (novel_id,),
+            )
+            if row:
+                return build_novel_profile_lock(
+                    title=row.get("title") or title or "",
+                    premise=row.get("premise") or premise or title,
+                    target_chapters=int(row.get("target_chapters") or 0) or None,
+                )
+        except Exception as exc:
+            logger.debug("读取 Knowledge 档案锁失败，使用调用参数: %s", exc)
+
+        return build_novel_profile_lock(title=title, premise=premise or title)
+
+    async def _generate_knowledge_data(
+        self,
+        title: str,
+        bible_summary: str,
+        profile_lock: str = "",
+    ) -> Dict[str, Any]:
         """使用 LLM 生成 Knowledge 数据（CPMS 统一入口）"""
 
-        context_section = f"\n\n**小说设定摘要：**\n{bible_summary}" if bible_summary.strip() else ""
+        context_parts = []
+        if profile_lock.strip():
+            context_parts.append(f"**故事内核锁：**\n{profile_lock}")
+        if bible_summary.strip():
+            context_parts.append(f"**小说设定摘要：**\n{bible_summary}")
+        context_section = "\n\n" + "\n\n".join(context_parts) if context_parts else ""
 
         # CPMS render
         from infrastructure.ai.prompt_keys import KNOWLEDGE_INITIAL
@@ -66,6 +104,7 @@ class AutoKnowledgeGenerator:
         variables = {
             "title": title,
             "bible_summary": bible_summary or "",
+            "profile_lock": profile_lock or "",
         }
         prompt = registry.render_to_prompt(KNOWLEDGE_INITIAL, variables)
 
@@ -74,6 +113,11 @@ class AutoKnowledgeGenerator:
             system_prompt = build_initial_knowledge_system_prompt()
             user_prompt = f"小说标题：《{title}》{context_section}"
             prompt = Prompt(system=system_prompt, user=user_prompt)
+        elif profile_lock and "故事内核锁" not in (prompt.system + prompt.user):
+            prompt = Prompt(
+                system=prompt.system,
+                user=(prompt.user or "").rstrip() + "\n\n" + profile_lock,
+            )
 
         config = GenerationConfig(max_tokens=2048, temperature=0.4)
 

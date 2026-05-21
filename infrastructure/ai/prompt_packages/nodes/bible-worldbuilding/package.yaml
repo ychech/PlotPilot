@@ -15,5 +15,9 @@ variables:
   desc: 已有设定
   type: string
   default: ''
+- name: target_chapters
+  desc: 目标章节数
+  type: integer
+  required: true
 id: bible-worldbuilding
 sort_order: 27

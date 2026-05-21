@@ -85,6 +85,10 @@ class GenerateChapterRequest(BaseModel):
         max_length=2000,
         description="重新生成指导（告诉 AI 改进方向；仅用于重写已有章节时）",
     )
+    enable_beats: bool = Field(
+        True,
+        description="是否启用节拍拆分生成；默认开启，成文质量优先",
+    )
 
 
 class StorylineMilestoneResponse(BaseModel):
@@ -227,8 +231,8 @@ class HostedWriteStreamRequest(BaseModel):
         description="是否先用模型生成本章要点大纲（否则用简短模板）",
     )
     enable_beats: bool = Field(
-        False,
-        description="是否启用节拍拆分生成；默认关闭以优先生成完整章节",
+        True,
+        description="是否启用节拍拆分生成；默认开启，成文质量优先",
     )
 
 
@@ -267,6 +271,7 @@ async def generate_chapter_stream(
             chapter_number=request.chapter_number,
             outline=request.outline,
             scene_director=scene_director,
+            enable_beats=request.enable_beats,
             regeneration_guidance=request.regeneration_guidance,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -1016,8 +1021,9 @@ async def generate_bible(
 
         bible_data = await bible_generator.generate_and_save(
             novel_id=novel_id,
-            title=novel.title,
+            premise=novel.premise or novel.title,
             target_chapters=novel.target_chapters,
+            title=novel.title,
         )
 
         chars = bible_data.get("characters", [])
@@ -1078,6 +1084,7 @@ async def generate_knowledge(
             novel_id=novel_id,
             title=novel.title,
             bible_summary=bible_summary,
+            premise=novel.premise or novel.title,
         )
 
         facts_count = len(knowledge_data.get("facts", []))

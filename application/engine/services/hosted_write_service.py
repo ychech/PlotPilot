@@ -77,7 +77,7 @@ class HostedWriteService:
         to_chapter: int,
         auto_save: bool = True,
         auto_outline: bool = True,
-        enable_beats: bool = False,
+        enable_beats: bool = True,
     ) -> AsyncIterator[Dict[str, Any]]:
         """按章节区间连续生成；每章先大纲（LLM 或模板），再复用 generate_chapter_stream。
 
