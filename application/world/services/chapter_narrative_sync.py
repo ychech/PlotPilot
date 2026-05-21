@@ -230,25 +230,15 @@ async def llm_chapter_extract_bundle(
 
 请判断本章是否呼应/回收了上述伏笔。如果章节内容明确揭示或回应了某个伏笔的悬念，则在 consumed_foreshadows 中列出该伏笔的原描述（需与清单中的描述高度匹配）。"""
 
-    # CPMS render
     from infrastructure.ai.prompt_keys import CHAPTER_NARRATIVE_SYNC
-    from infrastructure.ai.prompt_registry import get_prompt_registry
+    from infrastructure.ai.prompt_utils import render_prompt
 
     variables = {
         "content": body,
         "foreshadow_context": foreshadow_context,
     }
-    registry = get_prompt_registry()
-    prompt = registry.render_to_prompt(CHAPTER_NARRATIVE_SYNC, variables)
-
-    if not prompt:
-        # 降级：直接拼接
-        from infrastructure.ai.prompt_utils import get_prompt_system
-        system = get_prompt_system(CHAPTER_NARRATIVE_SYNC)
-        if not system:
-            system = f"你是网文叙事编辑与信息抽取。根据章节正文输出一个JSON对象。{foreshadow_context}"
-        user = f"第 {chapter_number} 章正文如下：\n\n{body}"
-        prompt = Prompt(system=system, user=user)
+    rendered = render_prompt(CHAPTER_NARRATIVE_SYNC, variables)
+    prompt = Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
     config = GenerationConfig(max_tokens=4096, temperature=0.45)
 
     result = await llm.generate(prompt, config)

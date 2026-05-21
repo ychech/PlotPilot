@@ -1,0 +1,42 @@
+name: 精密宏观规划字段补全
+category: planning
+source: application/blueprint/services/continuous_planning_service.py::_build_precise_repair_prompt()
+description: 精密宏观规划修复：只为缺字段的幕生成 node_updates 补丁。
+builtin: true
+tags:
+- 规划
+- 宏观规划
+- 修复
+- JSON输出
+output_format: json
+variables:
+- name: target_chapters
+  desc: 目标章节数。
+  type: number
+  required: true
+- name: parts
+  desc: 固定部数。
+  type: number
+  required: true
+- name: volumes_per_part
+  desc: 每部固定卷数。
+  type: number
+  required: true
+- name: acts_per_volume
+  desc: 每卷固定幕数。
+  type: number
+  required: true
+- name: avg_chapters_per_act
+  desc: 平均每幕章节数。
+  type: number
+  required: true
+- name: worldview_context
+  desc: Bible 世界观、人物、地点整理后的上下文。
+  type: string
+  required: true
+- name: incomplete_acts_block
+  desc: 待补全幕列表，含 node_id、标题、简介和缺失字段。
+  type: string
+  required: true
+id: planning-macro-repair
+sort_order: 22

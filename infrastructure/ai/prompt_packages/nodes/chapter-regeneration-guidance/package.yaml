@@ -1,0 +1,16 @@
+name: 章节重新生成指导
+category: generation
+source: application/workflows/auto_novel_generation_workflow.py::_build_prompt()
+description: 章节重新生成时注入用户或质量门禁给出的改进方向。
+builtin: true
+tags:
+- 重写
+- 章节生成
+output_format: text
+variables:
+- name: regeneration_guidance
+  desc: 重新生成的改进方向。
+  type: string
+  required: true
+id: chapter-regeneration-guidance
+sort_order: 8

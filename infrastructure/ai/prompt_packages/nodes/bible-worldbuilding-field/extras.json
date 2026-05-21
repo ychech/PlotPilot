@@ -1,0 +1,20 @@
+{
+  "_field_plan": [
+    {"dimension":"core_rules","dimension_label":"核心法则","field":"power_system","field_label":"力量体系","field_desc":"力量体系/科技树：谁拥有力量（先天血脉/后天修炼/财富购买/科技改造）？力量的上限在哪？不同层级的能力差距有多大？弱者有没有翻盘的可能？"},
+    {"dimension":"core_rules","dimension_label":"核心法则","field":"physics_rules","field_label":"物理规律","field_desc":"物理规律：这个世界与地球物理有什么不同（重力、时间流速、空间结构）？是否存在洞天福地/异次元/虚拟世界？穿越者会感到什么不适？"},
+    {"dimension":"core_rules","dimension_label":"核心法则","field":"magic_tech","field_label":"魔法/科技","field_desc":"魔法/科技的运作机制：能量从哪来？释放的代价是什么（寿命/记忆/资源/道德）？有没有失控反噬的风险？泛滥还是稀缺？"},
+    {"dimension":"geography","dimension_label":"地理生态","field":"terrain","field_label":"地形","field_desc":"主要地形：这个世界长什么样（大陆/群岛/地下城/空中浮岛/星际殖民地）？有哪些标志性地标？地形如何塑造了文明的分布和冲突？"},
+    {"dimension":"geography","dimension_label":"地理生态","field":"climate","field_label":"气候","field_desc":"气候：有没有极端天气（永夜/永昼/酸雨/灵气风暴）？季节如何影响生存和剧情？气候如何塑造了当地人的性格？"},
+    {"dimension":"geography","dimension_label":"地理生态","field":"resources","field_label":"资源","field_desc":"资源分布：什么资源最值钱（灵石/基因药剂/稀土/信息）？资源集中在谁手里？资源不均引发了什么冲突？"},
+    {"dimension":"geography","dimension_label":"地理生态","field":"ecology","field_label":"生态","field_desc":"生态与生物链：有什么独特的动植物（妖兽/变异种/机械兽）？它们与人类是什么关系（猎杀/共生/驯化/恐惧）？食物链的顶端是什么？"},
+    {"dimension":"society","dimension_label":"社会结构","field":"politics","field_label":"政治体制","field_desc":"政治体制：谁在统治（帝制/议会/宗门/军阀/AI）？权力如何传递（继承/选举/武力夺取/算法指定）？有没有制衡力量？底层有没有上升通道？"},
+    {"dimension":"society","dimension_label":"社会结构","field":"economy","field_label":"经济模式","field_desc":"经济模式：钱从哪来？普通人靠什么活（种田/任务/采集/信息交易）？贫富差距有多大？有没有地下经济/黑市？"},
+    {"dimension":"society","dimension_label":"社会结构","field":"class_system","field_label":"阶级系统","field_desc":"阶级系统：社会分几层？阶层之间能不能流动（通过考试/婚姻/战斗/科技）？底层认命还是反抗？上层有什么特权？"},
+    {"dimension":"culture","dimension_label":"历史文化","field":"history","field_label":"历史事件","field_desc":"关键历史事件：世界怎么变成今天这样的（战争/灾变/发现/背叛）？谁在书写历史——赢家还是被抹去的失败者？有没有被篡改的官方叙事？"},
+    {"dimension":"culture","dimension_label":"历史文化","field":"religion","field_label":"宗教信仰","field_desc":"宗教信仰：人们信什么（神/天道/科学/祖先/AI）？宗教是统治工具还是反抗旗帜？不信的人会怎样？有没有神迹真实发生过？"},
+    {"dimension":"culture","dimension_label":"历史文化","field":"taboos","field_label":"文化禁忌","field_desc":"文化禁忌：什么东西绝对不能碰（亵渎祖先/跨阶级通婚/说出真名/接触异族）？犯禁的人会怎样？这些禁忌背后藏着什么秘密？"},
+    {"dimension":"daily_life","dimension_label":"沉浸感细节","field":"food_clothing","field_label":"衣食住行","field_desc":"衣食住行：普通人吃什么、穿什么、住什么？不同阶层的生活差异有多大（把差距写具体）？有什么这个世界独有的日常物品？"},
+    {"dimension":"daily_life","dimension_label":"沉浸感细节","field":"language_slang","field_label":"俚语与口音","field_desc":"俚语与方言：不同阶层/职业/地区说话有什么不同？有什么这个世界独有的骂人话、口头禅、行话？初次见面怎么打招呼？"},
+    {"dimension":"daily_life","dimension_label":"沉浸感细节","field":"entertainment","field_label":"娱乐方式","field_desc":"娱乐与消遣：普通人怎么放松（赌场/茶馆/斗兽/虚拟游戏/地下格斗）？什么娱乐是禁忌的？有权势的人玩什么？"}
+  ]
+}

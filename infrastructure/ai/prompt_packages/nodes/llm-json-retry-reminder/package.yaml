@@ -1,0 +1,12 @@
+name: LLM JSON retry reminder
+category: generation
+source: application/world/services/auto_bible_generator.py::_call_llm_and_parse_with_retry()
+description: Retry suffix used after JSON parsing failure
+builtin: true
+tags:
+- llm
+- json
+- retry
+variables: []
+id: llm-json-retry-reminder
+sort_order: 15

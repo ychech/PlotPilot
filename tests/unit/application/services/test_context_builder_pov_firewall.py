@@ -26,6 +26,7 @@ def mock_dependencies():
         "chapter_repository": chapter_repository,
         "plot_arc_repository": None,
         "embedding_service": None,
+        "bible_repository": Mock(),
     }
 
 
@@ -33,6 +34,15 @@ def mock_dependencies():
 def context_builder(mock_dependencies):
     """创建 ContextBuilder 实例"""
     return ContextBuilder(**mock_dependencies)
+
+
+def _set_bible(mock_dependencies, bible_dto):
+    mock_dependencies["bible_service"].get_bible_by_novel.return_value = bible_dto
+    mock_dependencies["bible_repository"].get_by_novel_id.return_value = bible_dto
+
+
+def _character_context(result):
+    return result["layer1_text"]
 
 
 def test_layer2_excludes_hidden_before_reveal(context_builder, mock_dependencies):
@@ -58,7 +68,7 @@ def test_layer2_excludes_hidden_before_reveal(context_builder, mock_dependencies
         style_notes=[]
     )
 
-    mock_dependencies["bible_service"].get_bible_by_novel.return_value = bible_dto
+    _set_bible(mock_dependencies, bible_dto)
     mock_dependencies["novel_repository"].get_by_id.return_value = None
 
     # Act
@@ -70,11 +80,11 @@ def test_layer2_excludes_hidden_before_reveal(context_builder, mock_dependencies
     )
 
     # Assert
-    layer2_text = result["layer2_text"]
-    assert "林雪" in layer2_text, "角色名应该出现"
-    assert "警察，外表冷静" in layer2_text, "public_profile 应该出现"
-    assert "卧底" not in layer2_text, "hidden_profile 不应出现（章节 10 < reveal_chapter 100）"
-    assert "潜伏在黑帮" not in layer2_text, "hidden_profile 内容不应出现"
+    context_text = _character_context(result)
+    assert "林雪" in context_text, "角色名应该出现"
+    assert "警察，外表冷静" in context_text, "public_profile 应该出现"
+    assert "卧底" not in context_text, "hidden_profile 不应出现（章节 10 < reveal_chapter 100）"
+    assert "潜伏在黑帮" not in context_text, "hidden_profile 内容不应出现"
 
 
 def test_layer2_includes_hidden_after_reveal(context_builder, mock_dependencies):
@@ -100,7 +110,7 @@ def test_layer2_includes_hidden_after_reveal(context_builder, mock_dependencies)
         style_notes=[]
     )
 
-    mock_dependencies["bible_service"].get_bible_by_novel.return_value = bible_dto
+    _set_bible(mock_dependencies, bible_dto)
     mock_dependencies["novel_repository"].get_by_id.return_value = None
 
     # Act
@@ -112,11 +122,11 @@ def test_layer2_includes_hidden_after_reveal(context_builder, mock_dependencies)
     )
 
     # Assert
-    layer2_text = result["layer2_text"]
-    assert "林雪" in layer2_text, "角色名应该出现"
-    assert "警察，外表冷静" in layer2_text, "public_profile 应该出现"
-    assert "卧底" in layer2_text, "hidden_profile 应该出现（章节 100 >= reveal_chapter 100）"
-    assert "潜伏在黑帮" in layer2_text, "hidden_profile 内容应该出现"
+    context_text = _character_context(result)
+    assert "林雪" in context_text, "角色名应该出现"
+    assert "警察，外表冷静" in context_text, "public_profile 应该出现"
+    assert "卧底" in context_text, "hidden_profile 应该出现（章节 100 >= reveal_chapter 100）"
+    assert "潜伏在黑帮" in context_text, "hidden_profile 内容应该出现"
 
 
 def test_layer2_includes_hidden_when_no_reveal_chapter(context_builder, mock_dependencies):
@@ -142,7 +152,7 @@ def test_layer2_includes_hidden_when_no_reveal_chapter(context_builder, mock_dep
         style_notes=[]
     )
 
-    mock_dependencies["bible_service"].get_bible_by_novel.return_value = bible_dto
+    _set_bible(mock_dependencies, bible_dto)
     mock_dependencies["novel_repository"].get_by_id.return_value = None
 
     # Act
@@ -154,10 +164,10 @@ def test_layer2_includes_hidden_when_no_reveal_chapter(context_builder, mock_dep
     )
 
     # Assert
-    layer2_text = result["layer2_text"]
-    assert "张伟" in layer2_text, "角色名应该出现"
-    assert "商人" in layer2_text, "public_profile 应该出现"
-    assert "犯罪前科" in layer2_text, "hidden_profile 应该出现（reveal_chapter=None）"
+    context_text = _character_context(result)
+    assert "张伟" in context_text, "角色名应该出现"
+    assert "商人" in context_text, "public_profile 应该出现"
+    assert "犯罪前科" in context_text, "hidden_profile 应该出现（reveal_chapter=None）"
 
 
 def test_layer2_uses_public_profile_always(context_builder, mock_dependencies):
@@ -183,7 +193,7 @@ def test_layer2_uses_public_profile_always(context_builder, mock_dependencies):
         style_notes=[]
     )
 
-    mock_dependencies["bible_service"].get_bible_by_novel.return_value = bible_dto
+    _set_bible(mock_dependencies, bible_dto)
     mock_dependencies["novel_repository"].get_by_id.return_value = None
 
     # Act - 测试多个章节
@@ -196,9 +206,9 @@ def test_layer2_uses_public_profile_always(context_builder, mock_dependencies):
         )
 
         # Assert
-        layer2_text = result["layer2_text"]
-        assert "李明" in layer2_text, f"角色名应该在章节 {chapter_num} 出现"
-        assert "大学教授，温文尔雅" in layer2_text, f"public_profile 应该在章节 {chapter_num} 出现"
+        context_text = _character_context(result)
+        assert "李明" in context_text, f"角色名应该在章节 {chapter_num} 出现"
+        assert "大学教授，温文尔雅" in context_text, f"public_profile 应该在章节 {chapter_num} 出现"
 
 
 def test_layer2_backward_compatible_with_old_data(context_builder, mock_dependencies):
@@ -221,7 +231,7 @@ def test_layer2_backward_compatible_with_old_data(context_builder, mock_dependen
         style_notes=[]
     )
 
-    mock_dependencies["bible_service"].get_bible_by_novel.return_value = bible_dto
+    _set_bible(mock_dependencies, bible_dto)
     mock_dependencies["novel_repository"].get_by_id.return_value = None
 
     # Act
@@ -233,9 +243,9 @@ def test_layer2_backward_compatible_with_old_data(context_builder, mock_dependen
     )
 
     # Assert
-    layer2_text = result["layer2_text"]
-    assert "王芳" in layer2_text, "角色名应该出现"
-    assert "资深记者，善于调查" in layer2_text, "description 应该作为后备出现"
+    context_text = _character_context(result)
+    assert "王芳" in context_text, "角色名应该出现"
+    assert "资深记者，善于调查" in context_text, "description 应该作为后备出现"
 
 
 def test_layer2_multiple_characters_with_different_reveal_chapters(context_builder, mock_dependencies):
@@ -281,7 +291,7 @@ def test_layer2_multiple_characters_with_different_reveal_chapters(context_build
         style_notes=[]
     )
 
-    mock_dependencies["bible_service"].get_bible_by_novel.return_value = bible_dto
+    _set_bible(mock_dependencies, bible_dto)
     mock_dependencies["novel_repository"].get_by_id.return_value = None
 
     # Act - 章节 75（在 char1 reveal 之后，char2 reveal 之前）
@@ -293,19 +303,19 @@ def test_layer2_multiple_characters_with_different_reveal_chapters(context_build
     )
 
     # Assert
-    layer2_text = result["layer2_text"]
+    context_text = _character_context(result)
 
     # char1: 应该显示 hidden（75 >= 50）
-    assert "角色A" in layer2_text
-    assert "表面身份A" in layer2_text
-    assert "秘密A" in layer2_text
+    assert "角色A" in context_text
+    assert "表面身份A" in context_text
+    assert "秘密A" in context_text
 
     # char2: 不应显示 hidden（75 < 100）
-    assert "角色B" in layer2_text
-    assert "表面身份B" in layer2_text
-    assert "秘密B" not in layer2_text
+    assert "角色B" in context_text
+    assert "表面身份B" in context_text
+    assert "秘密B" not in context_text
 
     # char3: 应该显示 hidden（reveal_chapter=None）
-    assert "角色C" in layer2_text
-    assert "表面身份C" in layer2_text
-    assert "秘密C" in layer2_text
+    assert "角色C" in context_text
+    assert "表面身份C" in context_text
+    assert "秘密C" in context_text

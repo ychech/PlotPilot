@@ -28,12 +28,23 @@ BIBLE_WORLDBUILDING_FIELD = "bible-worldbuilding-field"
 BIBLE_CHARACTERS = "bible-characters"
 BIBLE_LOCATIONS = "bible-locations"
 BIBLE_STYLE_CONVENTION = "bible-style-convention"
+BIBLE_CHAIN_CONTEXT = "bible-chain-context"
+NOVEL_PROFILE_LOCK = "novel-profile-lock"
+LLM_JSON_RETRY_REMINDER = "llm-json-retry-reminder"
 
 # ── Chapter generation ───────────────────────────────────────────────────
 CHAPTER_GENERATION_MAIN = "chapter-generation-main"
 CHAPTER_GENERATION_BASIC = "chapter-generation-basic"
 CHAPTER_CONTEXT_ALIGNMENT = "chapter-context-alignment"
 CHAPTER_QUALITY_REPAIR = "chapter-quality-repair"
+CHAPTER_CHARACTER_CANON_CONTRACT = "chapter-character-canon-contract"
+CHAPTER_NAME_CANON_GUARD = "chapter-name-canon-guard"
+CHAPTER_COMPLETION_CONTRACT = "chapter-completion-contract"
+CHAPTER_BEAT_CONTINUATION = "chapter-beat-continuation"
+CHAPTER_BEAT_TRANSITION_FALLBACK = "chapter-beat-transition-fallback"
+CHAPTER_REGENERATION_GUIDANCE = "chapter-regeneration-guidance"
+CHAPTER_SHUANGWEN_DIRECTIVE = "chapter-shuangwen-directive"
+CHAPTER_OUTLINE_SUGGEST = "chapter-outline-suggest"
 CHAPTER_NARRATIVE_SYNC = "chapter-narrative-sync"
 CHAPTER_STATE_EXTRACTION = "chapter-state-extraction"
 CHAPTER_SUMMARIZER = "chapter-summarizer"
@@ -65,9 +76,11 @@ MEMORY_EXTRACTION = "memory-extraction"
 # ── Planning ─────────────────────────────────────────────────────────────
 PLANNING_QUICK_MACRO = "planning-quick-macro"
 PLANNING_MACRO_PRECISE = "planning-macro-precise"
+PLANNING_MACRO_VOLUME = "planning-macro-volume"
 PLANNING_MACRO_REPAIR = "planning-macro-repair"
 PLANNING_ACT = "planning-act"
 PLANNING_MAIN_PLOT_SUGGEST = "planning-main-plot-suggest"
+PLANNING_NEXT_ACT_DUAL_TRACK = "planning-next-act-dual-track"
 OUTLINE_BEAT_PARTITION = "outline-beat-partition"
 
 # ── Style / Voice ────────────────────────────────────────────────────────
@@ -121,9 +134,14 @@ ALL_KEYS: frozenset[str] = frozenset({
     # Bible
     BIBLE_ALL, BIBLE_WORLDBUILDING, BIBLE_CHARACTERS, BIBLE_LOCATIONS,
     BIBLE_STYLE_CONVENTION, BIBLE_WORLDBUILDING_DIMENSION, BIBLE_WORLDBUILDING_FIELD,
+    BIBLE_CHAIN_CONTEXT, NOVEL_PROFILE_LOCK, LLM_JSON_RETRY_REMINDER,
     # Chapter
     CHAPTER_GENERATION_MAIN, CHAPTER_GENERATION_BASIC,
     CHAPTER_CONTEXT_ALIGNMENT, CHAPTER_QUALITY_REPAIR,
+    CHAPTER_CHARACTER_CANON_CONTRACT, CHAPTER_NAME_CANON_GUARD,
+    CHAPTER_COMPLETION_CONTRACT, CHAPTER_BEAT_CONTINUATION,
+    CHAPTER_BEAT_TRANSITION_FALLBACK, CHAPTER_REGENERATION_GUIDANCE,
+    CHAPTER_SHUANGWEN_DIRECTIVE, CHAPTER_OUTLINE_SUGGEST,
     CHAPTER_NARRATIVE_SYNC, CHAPTER_STATE_EXTRACTION, CHAPTER_SUMMARIZER,
     CHAPTER_BRIDGE_EXTRACT, CHAPTER_BRIDGE_CHECK, CHAPTER_BRIDGE_FIX,
     # Scene
@@ -140,8 +158,8 @@ ALL_KEYS: frozenset[str] = frozenset({
     MEMORY_EXTRACTION,
     # Planning
     PLANNING_QUICK_MACRO, PLANNING_MACRO_PRECISE, PLANNING_MACRO_REPAIR,
-    PLANNING_ACT, PLANNING_MAIN_PLOT_SUGGEST,
-    OUTLINE_BEAT_PARTITION,
+    PLANNING_MACRO_VOLUME, PLANNING_ACT, PLANNING_MAIN_PLOT_SUGGEST,
+    PLANNING_NEXT_ACT_DUAL_TRACK, OUTLINE_BEAT_PARTITION,
     # Style
     STYLE_ANALYSIS, VOICE_STYLE_ANALYSIS, VOICE_BASELINE_ANALYSIS,
     VOICE_REWRITE,

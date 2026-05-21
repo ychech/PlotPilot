@@ -23,6 +23,7 @@ async def test_generate_worldbuilding_and_style_completes_dimension_fields():
             },
         }
     )
+    svc._generate_style = AsyncMock(return_value="冷峻克制")
     async def _fake_generate_single_field(*args, **kwargs):
         field_key = args[3]
         if field_key == "power_system":

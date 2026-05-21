@@ -19,7 +19,7 @@ variables:
   prompt_role: background_constraints
   token_budget: 35000
   empty_behavior: 生成不应依赖空 context；若为空，优先检查上下文构建器和数据源。
-  editor_note: 模板里不要要求模型复述 context，只要求它内化并对齐。
+  editor_note: 模板中要求模型内化并对齐 context，正文自然承接即可。
 - name: outline
   desc: 本章大纲；用户或托管大纲生成器提供。若与 Bible/FACT_LOCK 冲突，正文只保留其核心事件意图。
   type: string

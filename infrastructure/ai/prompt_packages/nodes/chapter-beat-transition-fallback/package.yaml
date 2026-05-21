@@ -1,0 +1,23 @@
+name: 章节节拍过渡兜底
+category: generation
+source: application/workflows/auto_novel_generation_workflow.py::_build_prompt()
+description: 节拍尾部锚点提取失败时的通用过渡指导片段。
+builtin: true
+tags:
+- 节拍
+- 过渡
+- 兜底
+output_format: text
+variables:
+- name: beat_index
+  desc: 当前节拍序号或索引。
+  type: integer
+  required: false
+  default: 0
+- name: total_beats
+  desc: 总节拍数。
+  type: integer
+  required: false
+  default: 1
+id: chapter-beat-transition-fallback
+sort_order: 7

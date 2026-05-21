@@ -1,0 +1,40 @@
+name: Bible chain context
+category: world
+source: application/world/services/auto_bible_generator.py::_build_bible_chain_context()
+description: Build chained upstream context for Bible generation nodes
+builtin: true
+tags:
+- bible
+- chain
+- context
+variables:
+- name: stage
+  desc: Current generation stage
+  type: string
+  default: bible
+- name: target_chapters
+  desc: Target chapter count
+  type: integer
+  required: true
+- name: premise
+  desc: Raw story premise
+  type: string
+  default: ''
+- name: profile_lock
+  desc: Rendered immutable novel profile lock
+  type: string
+  default: ''
+- name: worldbuilding_summary
+  desc: Upstream worldbuilding summary
+  type: string
+  default: ''
+- name: style_guide
+  desc: Upstream style convention
+  type: string
+  default: ''
+- name: characters_summary
+  desc: Upstream character summary
+  type: string
+  default: ''
+id: bible-chain-context
+sort_order: 11

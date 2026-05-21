@@ -1,0 +1,34 @@
+name: 下一幕双轨规划
+category: planning
+source: application/blueprint/services/continuous_planning_service.py::_build_next_act_prompt_with_dual_track()
+description: 基于卷级摘要、当前卷摘要、待回收伏笔与角色状态，为下一幕生成详细规划。
+builtin: true
+tags:
+- 规划
+- 双轨
+- JSON输出
+output_format: json
+variables:
+- name: context_block
+  desc: 双轨上下文聚合块。
+  type: string
+  required: true
+- name: current_act_title
+  desc: 当前幕标题。
+  type: string
+  required: true
+- name: current_act_description
+  desc: 当前幕描述。
+  type: string
+  required: false
+  default: 无
+- name: current_act_number
+  desc: 当前幕号。
+  type: integer
+  required: true
+- name: next_act_number
+  desc: 下一幕号。
+  type: integer
+  required: true
+id: planning-next-act-dual-track
+sort_order: 27

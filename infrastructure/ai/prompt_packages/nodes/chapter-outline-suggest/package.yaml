@@ -1,0 +1,21 @@
+name: 托管章节要点大纲建议
+category: generation
+source: application/workflows/auto_novel_generation_workflow.py::suggest_outline()
+description: 托管模式下根据全书上下文生成当前章节的 1-6 条要点大纲。
+builtin: true
+tags:
+- 托管
+- 章节大纲
+- 章节生成
+output_format: text
+variables:
+- name: context
+  desc: 背景信息节选。
+  type: string
+  required: true
+- name: chapter_number
+  desc: 当前章节号。
+  type: integer
+  required: true
+id: chapter-outline-suggest
+sort_order: 10

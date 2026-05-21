@@ -16,5 +16,13 @@ variables:
 - name: settings
   desc: 已有设定信息
   type: string
+- name: bible_summary
+  desc: Bible 摘要
+  type: string
+  default: ''
+- name: profile_lock
+  desc: 故事内核锁
+  type: string
+  default: ''
 id: knowledge-initial
 sort_order: 9

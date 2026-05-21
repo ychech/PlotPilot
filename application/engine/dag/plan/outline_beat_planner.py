@@ -100,6 +100,17 @@ def segment_structured_outline(outline: str) -> Optional[List[str]]:
     return None
 
 
+def _clamp_atom_weight(weight: Any, *, default: float = 1.0) -> float:
+    """Normalize model-provided weights to PlanAtomSpec bounds before validation."""
+    try:
+        wf = float(weight)
+    except (TypeError, ValueError):
+        return default
+    if wf <= 0:
+        return default
+    return max(0.01, min(100.0, wf))
+
+
 def _clamp_atoms(atoms: List[PlanAtomSpec]) -> List[PlanAtomSpec]:
     if len(atoms) <= _MAX_ATOMS:
         return atoms
@@ -108,7 +119,7 @@ def _clamp_atoms(atoms: List[PlanAtomSpec]) -> List[PlanAtomSpec]:
     tail = PlanAtomSpec(
         id=atoms[_MAX_ATOMS - 1].id,
         intent=tail_intent,
-        weight=sum(a.weight for a in atoms[_MAX_ATOMS - 1 :]),
+        weight=_clamp_atom_weight(sum(a.weight for a in atoms[_MAX_ATOMS - 1 :])),
         source_hint=None,
         extensions={"merged_from_overflow": True},
     )
@@ -125,7 +136,7 @@ def atoms_from_segments(segments: Sequence[str]) -> List[PlanAtomSpec]:
             PlanAtomSpec(
                 id=f"b{i + 1}",
                 intent=seg,
-                weight=float(max(12, len(seg))),
+                weight=_clamp_atom_weight(max(12, len(seg))),
                 source_hint=None,
                 extensions={"decomposition_mode": "structured_outline"},
             )
@@ -173,7 +184,7 @@ def atoms_from_beat_sheet_dict(data: Dict[str, Any]) -> Optional[List[PlanAtomSp
         if len(intent.strip()) < 2:
             continue
         ew = raw.get("estimated_words")
-        weight = float(ew) if isinstance(ew, (int, float)) and ew > 0 else 1.0
+        weight = _clamp_atom_weight(ew)
         ext = {"decomposition_mode": "beat_sheet", "scene_index": i}
         for k in ("pov_character", "location", "tone", "transition_from_prev"):
             if raw.get(k):
@@ -192,7 +203,7 @@ def _normalize_llm_atom_entries(entries: List[Dict[str, Any]]) -> List[PlanAtomS
             continue
         atom_id = str(row.get("id") or "").strip() or f"b{i + 1}"
         weight = row.get("weight")
-        wf = float(weight) if isinstance(weight, (int, float)) and weight > 0 else 1.0
+        wf = _clamp_atom_weight(weight)
         hint = row.get("source_hint") or row.get("anchor")
         hint_s = str(hint).strip() if hint else None
         ext = dict(row.get("extensions") or {}) if isinstance(row.get("extensions"), dict) else {}

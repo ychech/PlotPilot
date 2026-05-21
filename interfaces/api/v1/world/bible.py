@@ -6,6 +6,7 @@ from typing import Optional, Union
 import logging
 import json
 import asyncio
+import inspect
 
 from application.world.services.bible_service import BibleService
 from application.world.services.auto_bible_generator import AutoBibleGenerator
@@ -28,6 +29,16 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/bible", tags=["bible"])
+
+
+def _supports_kwarg(fn, name: str) -> bool:
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True
+    return name in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
 
 
 # Request Models
@@ -345,30 +356,23 @@ async def _sse_bible_generator(
             yield _sse_fmt("phase", {"phase": "worldbuilding", "message": "AI 正在构建世界观（5维度框架）..."})
             await asyncio.sleep(0)
 
-            # 1. 先生成文风公约（快速，独立调用）
-            yield _sse_fmt("phase", {"phase": "worldbuilding_style", "message": "正在生成文风公约..."})
-            await asyncio.sleep(0)
-            try:
-                style_text = await bible_generator._generate_style(premise, novel.target_chapters)
-                if style_text:
-                    yield _sse_fmt("data", {"type": "style", "content": style_text})
-                    # 保存文风
-                    try:
-                        bible_generator.bible_service.add_style_note(
-                            novel_id=novel_id,
-                            note_id=f"{novel_id}-style-1",
-                            category="文风公约",
-                            content=style_text,
-                        )
-                    except Exception as e:
-                        logger.warning("Failed to save style note: %s", e)
-            except Exception as e:
-                logger.warning("Style generation failed (non-fatal): %s", e)
-
             announced_dims: set[str] = set()
-            async for item in bible_generator._stream_worldbuilding_fields(
+            generated_worldbuilding: dict[str, dict[str, str]] = {}
+            chain_context = ""
+            if hasattr(bible_generator, "_build_bible_chain_context"):
+                chain_context = bible_generator._build_bible_chain_context(
+                    premise,
+                    novel.target_chapters,
+                    stage="worldbuilding",
+                )
+            stream_worldbuilding = bible_generator._stream_worldbuilding_fields
+            worldbuilding_kwargs = {}
+            if _supports_kwarg(stream_worldbuilding, "chain_context"):
+                worldbuilding_kwargs["chain_context"] = chain_context
+            async for item in stream_worldbuilding(
                 premise,
                 novel.target_chapters,
+                **worldbuilding_kwargs,
             ):
                 dim_key = item["dimension"]
                 dim_label = item["dimension_label"]
@@ -411,6 +415,7 @@ async def _sse_bible_generator(
                 })
 
                 try:
+                    generated_worldbuilding.setdefault(dim_key, {})[field_key] = item["value"]
                     await bible_generator._save_worldbuilding(
                         novel_id,
                         {dim_key: {field_key: item["value"]}},
@@ -422,18 +427,74 @@ async def _sse_bible_generator(
 
             yield _sse_fmt("phase", {"phase": "worldbuilding_done", "message": "世界观生成完成！"})
 
+            # 世界观完成后再生成文风，让文风能继承已落地的规则、阶层、语感和叙事规模。
+            yield _sse_fmt("phase", {"phase": "worldbuilding_style", "message": "正在基于世界观生成文风公约..."})
+            await asyncio.sleep(0)
+            try:
+                style_context = chain_context
+                if hasattr(bible_generator, "_build_bible_chain_context"):
+                    style_context = bible_generator._build_bible_chain_context(
+                        premise,
+                        novel.target_chapters,
+                        worldbuilding=generated_worldbuilding,
+                        stage="style",
+                    )
+                generate_style = bible_generator._generate_style
+                style_kwargs = {}
+                if _supports_kwarg(generate_style, "worldbuilding"):
+                    style_kwargs["worldbuilding"] = generated_worldbuilding
+                if _supports_kwarg(generate_style, "chain_context"):
+                    style_kwargs["chain_context"] = style_context
+                style_text = await generate_style(
+                    premise,
+                    novel.target_chapters,
+                    **style_kwargs,
+                )
+                if style_text:
+                    yield _sse_fmt("data", {"type": "style", "content": style_text})
+                    try:
+                        bible_generator.bible_service.add_style_note(
+                            novel_id=novel_id,
+                            note_id=f"{novel_id}-style-1",
+                            category="文风公约",
+                            content=style_text,
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to save style note: %s", e)
+            except Exception as e:
+                logger.warning("Style generation failed (non-fatal): %s", e)
+
         if stage in ("all", "characters"):
             # ── 人物生成（流式 LLM） ──
             yield _sse_fmt("phase", {"phase": "characters", "message": "AI 正在生成主要角色..."})
             await asyncio.sleep(0)
 
             existing_worldbuilding = bible_generator._load_worldbuilding(novel_id)
+            style_guide = bible_generator._load_style_guide(novel_id) if hasattr(bible_generator, "_load_style_guide") else ""
+            chain_context = ""
+            if hasattr(bible_generator, "_build_bible_chain_context"):
+                chain_context = bible_generator._build_bible_chain_context(
+                    premise,
+                    novel.target_chapters,
+                    worldbuilding=existing_worldbuilding,
+                    style_guide=style_guide,
+                    stage="characters",
+                )
             chars_payload = []
             character_ids = []
             used_char_ids = set()
 
-            async for item in bible_generator._stream_generate_characters(
-                premise, novel.target_chapters, existing_worldbuilding
+            stream_characters = bible_generator._stream_generate_characters
+            character_kwargs = {}
+            if _supports_kwarg(stream_characters, "style_guide"):
+                character_kwargs["style_guide"] = style_guide
+            if _supports_kwarg(stream_characters, "chain_context"):
+                character_kwargs["chain_context"] = chain_context
+            async for item in stream_characters(
+                premise,
+                novel.target_chapters,
+                existing_worldbuilding,
+                **character_kwargs,
             ):
                 if item["type"] == "character":
                     char_data = item["content"]
@@ -490,11 +551,32 @@ async def _sse_bible_generator(
 
             existing_worldbuilding = bible_generator._load_worldbuilding(novel_id)
             existing_characters = bible_generator._load_characters(novel_id)
+            style_guide = bible_generator._load_style_guide(novel_id) if hasattr(bible_generator, "_load_style_guide") else ""
+            chain_context = ""
+            if hasattr(bible_generator, "_build_bible_chain_context"):
+                chain_context = bible_generator._build_bible_chain_context(
+                    premise,
+                    novel.target_chapters,
+                    worldbuilding=existing_worldbuilding,
+                    style_guide=style_guide,
+                    characters=existing_characters,
+                    stage="locations",
+                )
             locs_payload = []
             location_ids = []
 
-            async for item in bible_generator._stream_generate_locations(
-                premise, novel.target_chapters, existing_worldbuilding, existing_characters
+            stream_locations = bible_generator._stream_generate_locations
+            location_kwargs = {}
+            if _supports_kwarg(stream_locations, "style_guide"):
+                location_kwargs["style_guide"] = style_guide
+            if _supports_kwarg(stream_locations, "chain_context"):
+                location_kwargs["chain_context"] = chain_context
+            async for item in stream_locations(
+                premise,
+                novel.target_chapters,
+                existing_worldbuilding,
+                existing_characters,
+                **location_kwargs,
             ):
                 if item["type"] == "location":
                     loc_data = item["content"]

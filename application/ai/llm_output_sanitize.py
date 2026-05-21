@@ -51,6 +51,30 @@ _PREFACE_ANALYSIS = re.compile(
     r"^(?:我来分析一下|分析[：:]|Analysis[：:]).*?\n(?=[^\n])",
     re.DOTALL | re.IGNORECASE,
 )
+_ALL_CAPS_STATUS_PANEL = re.compile(
+    r"^\s*(?:[A-Z][A-Z0-9_-]{2,}\s*/\s*)?"
+    r"(?:[A-Z][A-Z0-9_ -]{2,}\s*:\s*[^/]+)"
+    r"(?:\s*/\s*[A-Z][A-Z0-9_ -]{2,}\s*:\s*[^/]+)+\s*$"
+)
+_ALL_CAPS_STATUS_FIELD = re.compile(
+    r"^\s*(?:SYNAPSE-\d+|STATUS|HOST|EXTERNAL SYNC|SYSTEM|SYNC|MEMORY|OBJECTIVE|MISSION|ERROR|WARNING)"
+    r"\s*(?::|/).*$",
+    re.IGNORECASE,
+)
+_ALL_CAPS_STATUS_FRAGMENT = re.compile(
+    r"^\s*(?:SYNAPSE(?:-\d*)?|STATUS|HOST|EXTERNAL(?:\s+SYNC)?|SYSTEM|SYNC|MEMORY|OBJECTIVE|MISSION|ERROR|WARNING)"
+    r"(?:\s*[/:-]?\s*[A-Z0-9_ -]*)?\s*$",
+    re.IGNORECASE,
+)
+_SCENE_LABEL_PREFIX = re.compile(
+    r"^\s*(?:画面|镜头|分镜|场景)\s*[一二三四五六七八九十百千万\d]*\s*[：:]\s*(.*)$"
+)
+_SCENE_LABEL_ONLY = re.compile(
+    r"^\s*(?:画面|镜头|分镜|场景)\s*[一二三四五六七八九十百千万\d]+\s*$"
+)
+_BRACKET_SCENE_LABEL_PREFIX = re.compile(
+    r"^\s*【\s*(?:画面|镜头|分镜|场景)[^】]{0,20}】\s*(.*)$"
+)
 
 
 def strip_and_aggregate_prose_fragments(
@@ -62,7 +86,7 @@ def strip_and_aggregate_prose_fragments(
     from application.ai.prose_fragment_aggregator import aggregate_inline_prose_fragments
 
     return aggregate_inline_prose_fragments(
-        strip_reasoning_artifacts(raw),
+        strip_prose_control_artifacts(strip_reasoning_artifacts(raw)),
         short_line_max_chars=short_line_max_chars,
     )
 
@@ -84,4 +108,66 @@ def strip_reasoning_artifacts(raw: str) -> str:
     s = _REASON_COMMENT.sub("", s)
     s = _MD_THINKING.sub("", s)
     s = _PREFACE_ANALYSIS.sub("", s)
+    return s
+
+
+def strip_prose_control_artifacts(raw: str) -> str:
+    """移除正文里泄漏的状态面板、分镜标签和镜头编号。
+
+    保留合法叙述，比如「画面一片白」；只处理明确的标签形态：
+    「画面一：」「镜头1：」「SYNAPSE-00 / STATUS: ...」。
+    """
+    if not raw:
+        return ""
+
+    cleaned_lines: list[str] = []
+    for line in raw.splitlines():
+        current = line
+        stripped = current.strip()
+        if not stripped:
+            cleaned_lines.append(current)
+            continue
+
+        if (
+            _ALL_CAPS_STATUS_PANEL.match(stripped)
+            or _ALL_CAPS_STATUS_FIELD.match(stripped)
+            or _ALL_CAPS_STATUS_FRAGMENT.match(stripped)
+            or _SCENE_LABEL_ONLY.match(stripped)
+        ):
+            continue
+
+        scene_match = _SCENE_LABEL_PREFIX.match(current)
+        if scene_match:
+            current = scene_match.group(1).lstrip()
+            if not current.strip():
+                continue
+
+        bracket_match = _BRACKET_SCENE_LABEL_PREFIX.match(current)
+        if bracket_match:
+            current = bracket_match.group(1).lstrip()
+            if not current.strip():
+                continue
+
+        if (
+            _ALL_CAPS_STATUS_PANEL.match(current.strip())
+            or _ALL_CAPS_STATUS_FIELD.match(current.strip())
+            or _ALL_CAPS_STATUS_FRAGMENT.match(current.strip())
+        ):
+            continue
+        cleaned_lines.append(current)
+
+    return "\n".join(cleaned_lines).strip()
+
+
+def normalize_prose_punctuation(raw: str) -> str:
+    """收敛正文里高频 AI 腔标点。
+
+    目前只处理中文破折号：把解释性/拖尾式停顿改成逗号或句号，
+    避免正文反复出现「——」造成模板感。
+    """
+    if not raw:
+        return ""
+    s = raw.replace("——", "，")
+    s = re.sub(r"，\s*([。！？!?])", r"\1", s)
+    s = re.sub(r"，{2,}", "，", s)
     return s

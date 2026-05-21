@@ -29,5 +29,9 @@ variables:
   desc: JSON field definitions for this dimension
   type: string
   required: true
+- name: chain_context
+  desc: Chained generation context and consistency checks
+  type: string
+  default: ''
 id: bible-worldbuilding-dimension
 sort_order: 13

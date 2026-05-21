@@ -36,5 +36,9 @@ variables:
   desc: Already generated fields in same dimension
   type: string
   default: ''
+- name: chain_context
+  desc: Chained generation context and consistency checks
+  type: string
+  default: ''
 id: bible-worldbuilding-field
 sort_order: 14

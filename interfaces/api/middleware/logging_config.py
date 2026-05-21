@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from typing import Optional
 
 # Valid logging levels for validation
@@ -12,6 +13,42 @@ VALID_LOGGING_LEVELS = [
     logging.ERROR,
     logging.CRITICAL
 ]
+
+
+class PromptLogFilter(logging.Filter):
+    """只放行 infrastructure.ai 命名空间下的日志记录，用于提示词专用日志文件。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name.startswith("infrastructure.ai")
+
+
+# 终端静默的 logger 前缀（守护进程轮询等高频日志，仍写入文件）
+_CONSOLE_SUPPRESS_PREFIXES = (
+    "application.engine.services.autopilot_daemon",
+    "infrastructure.persistence.database.sqlite_novel_repository",
+    "infrastructure.persistence.database.connection_pool",
+)
+
+
+class ConsoleQuietFilter(logging.Filter):
+    """终端不刷守护进程/数据库轮询日志，这些日志仍写入文件。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.name.startswith(_CONSOLE_SUPPRESS_PREFIXES)
+
+
+class UvicornAccessNoiseFilter(logging.Filter):
+    """Filter high-frequency successful polling requests from uvicorn access logs."""
+
+    _POLLING_200_RE = re.compile(
+        r'"GET (?P<path>/api/v1/(?:'
+        r'autopilot/[^/\s]+/(?:status|circuit-breaker)|'
+        r'novels/[^/\s]+/(?:monitor/voice-drift|foreshadow-ledger)'
+        r')(?:\?[^"\s]*)?) HTTP/[^"]+" 200'
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not self._POLLING_200_RE.search(record.getMessage())
 
 
 class SafeConsoleHandler(logging.StreamHandler):
@@ -125,6 +162,7 @@ def setup_logging(
     console_handler = SafeConsoleHandler()
     console_handler.setLevel(level)
     console_handler.setFormatter(console_formatter)
+    console_handler.addFilter(ConsoleQuietFilter())
     root_logger.addHandler(console_handler)
 
     if log_file is not None:
@@ -144,9 +182,45 @@ def setup_logging(
             print(f"WARNING: Failed to setup file logging: {e}")
             print("Logging will continue with console output only.")
 
+    # 提示词专用日志文件（与守护进程日志分离，仅 infrastructure.ai.* 日志写入）
+    prompts_log_file = os.getenv("PROMPTS_LOG_FILE", "logs/prompts.log")
+    if prompts_log_file:
+        try:
+            prompts_dir = os.path.dirname(prompts_log_file)
+            if prompts_dir and not os.path.exists(prompts_dir):
+                os.makedirs(prompts_dir, exist_ok=True)
+            prompts_handler = logging.FileHandler(prompts_log_file, encoding="utf-8")
+            prompts_handler.setLevel(logging.DEBUG)
+            prompts_handler.setFormatter(logging.Formatter(
+                format_string,
+                datefmt="%Y-%m-%d %H:%M:%S"
+            ))
+            prompts_handler.addFilter(PromptLogFilter())
+            root_logger.addHandler(prompts_handler)
+        except (OSError, IOError, PermissionError) as e:
+            print(f"WARNING: Failed to setup prompts log file: {e}")
+
     logging.getLogger("uvicorn").setLevel(logging.WARNING)
-    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.setLevel(logging.INFO)
+    if not any(isinstance(f, UvicornAccessNoiseFilter) for f in uvicorn_access_logger.filters):
+        uvicorn_access_logger.addFilter(UvicornAccessNoiseFilter())
+    for handler in uvicorn_access_logger.handlers:
+        if not any(isinstance(f, UvicornAccessNoiseFilter) for f in handler.filters):
+            handler.addFilter(UvicornAccessNoiseFilter())
     logging.getLogger("fastapi").setLevel(logging.WARNING)
+
+
+def configure_uvicorn_access_logging() -> None:
+    """Re-apply access-log filters after uvicorn installs its own handlers."""
+    filt = UvicornAccessNoiseFilter()
+    for name in ("uvicorn.access",):
+        logger_obj = logging.getLogger(name)
+        if not any(isinstance(f, UvicornAccessNoiseFilter) for f in logger_obj.filters):
+            logger_obj.addFilter(filt)
+        for handler in logger_obj.handlers:
+            if not any(isinstance(f, UvicornAccessNoiseFilter) for f in handler.filters):
+                handler.addFilter(filt)
 
     # 仅在需要抓包时用 DEBUG_HTTP=1；否则控制台会被 httpx/httpcore 逐帧日志淹没
     if os.environ.get("DEBUG_HTTP", "").strip().lower() not in {"1", "true", "yes"}:

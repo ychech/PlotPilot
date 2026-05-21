@@ -1,0 +1,13 @@
+name: 章节人名正典守卫
+category: generation
+source: application/workflows/auto_novel_generation_workflow.py::_build_prompt()
+description: 章节生成时的人名硬约束片段，避免大纲旧名、占位名覆盖 Bible 正典姓名。
+builtin: true
+tags:
+- 核心
+- 人名
+- Bible
+output_format: text
+variables: []
+id: chapter-name-canon-guard
+sort_order: 4

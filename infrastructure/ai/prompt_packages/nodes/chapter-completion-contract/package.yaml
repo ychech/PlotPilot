@@ -1,0 +1,13 @@
+name: 章节完整收束契约
+category: generation
+source: application/workflows/auto_novel_generation_workflow.py::_build_prompt()
+description: 章节正文形成阶段性结果，结尾落在完整句子、完整对白、完整动作或已发生的新事件之后。
+builtin: true
+tags:
+- 核心
+- 章节闭环
+- 断尾修复
+output_format: text
+variables: []
+id: chapter-completion-contract
+sort_order: 5

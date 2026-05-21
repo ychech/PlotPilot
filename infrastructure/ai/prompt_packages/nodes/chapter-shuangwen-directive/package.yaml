@@ -1,0 +1,17 @@
+name: 章节爽文引擎指令片段
+category: generation
+source: application/workflows/auto_novel_generation_workflow.py::_build_shuangwen_directive()
+description: 章节生成时按章节位置、节拍关键词和节拍位置选择注入的爽文节奏约束。规则正文在 extras.json 中维护。
+builtin: true
+tags:
+- 爽文
+- 节拍
+- 章节生成
+output_format: text
+variables:
+- name: directives
+  desc: 由工作流按章节位置和节拍类型选择出的指令片段。
+  type: string
+  required: true
+id: chapter-shuangwen-directive
+sort_order: 9

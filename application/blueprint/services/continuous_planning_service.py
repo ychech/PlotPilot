@@ -32,7 +32,9 @@ from application.core.novel_profile_lock import build_novel_profile_lock
 from infrastructure.ai.prompt_keys import (
     PLANNING_ACT,
     PLANNING_MACRO_PRECISE,
+    PLANNING_MACRO_VOLUME,
     PLANNING_MACRO_REPAIR,
+    PLANNING_NEXT_ACT_DUAL_TRACK,
     PLANNING_QUICK_MACRO,
 )
 from infrastructure.ai.prompt_utils import render_prompt
@@ -2060,15 +2062,8 @@ class ContinuousPlanningService:
         if rendered and (rendered.get("system") or rendered.get("user")):
             return Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
 
-        logger.warning("planning-quick-macro 渲染失败，使用极简宏观规划 fallback")
-        return Prompt(
-            system="你是小说结构规划编辑。请根据输入输出纯 JSON 宏观结构。",
-            user=(
-                f"{variables['worldview_context']}\n\n"
-                f"目标总篇幅：{target_chapters} 章。\n"
-                '输出格式：{"parts":[{"title":"","volumes":[{"title":"","estimated_chapters":0,"acts":[]}]}]}'
-            ),
-        )
+        logger.warning("planning-quick-macro 渲染失败，返回空 Prompt")
+        return Prompt(system="", user="")
 
     def _format_macro_worldview_context(self, bible_context: Dict) -> str:
         """把 Bible 静态设定整理成宏观规划 node 的输入变量。"""
@@ -2137,20 +2132,13 @@ class ContinuousPlanningService:
         self,
         node_key: str,
         variables: Dict[str, object],
-        *,
-        fallback_system: str,
-        fallback_user: str,
     ) -> Prompt:
-        """渲染规划类 CPMS node；Registry 失效时使用最小 fallback。"""
-        rendered = render_prompt(
-            node_key,
-            variables,
-            fallback_system=fallback_system,
-            fallback_user=fallback_user,
-        )
+        """渲染规划类 CPMS node；提示词文本不在业务代码兜底。"""
+        rendered = render_prompt(node_key, variables)
         if rendered and (rendered.get("system") or rendered.get("user")):
             return Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
-        return Prompt(system=fallback_system, user=fallback_user)
+        logger.warning("%s 渲染失败，返回空 Prompt", node_key)
+        return Prompt(system="", user="")
 
     def _build_precise_pacing_guide(
         self,
@@ -2237,11 +2225,6 @@ class ContinuousPlanningService:
         return self._render_planning_prompt(
             PLANNING_MACRO_PRECISE,
             variables,
-            fallback_system="你是小说结构规划编辑。请严格按固定网格输出 node_updates JSON。",
-            fallback_user=(
-                f"{variables['worldview_context']}\n\n{variables['skeleton_block']}\n\n"
-                '{"node_updates":[{"node_id":"A1_1_1","title":"","description":""}]}'
-            ),
         )
 
     def _build_precise_volume_prompt(
@@ -2294,46 +2277,22 @@ class ContinuousPlanningService:
                 f'- {act["node_id"]}: {act["title"]}，需完整填写 narrative_goal / plot_points / key_characters / key_locations / emotional_arc / setup_for / payoff_from'
             )
 
-        system_msg = """你是长篇小说结构设计师。当前任务不是规划整本书，而是只完成一个卷的详细结构设计。
-你必须为当前卷内的每一幕填写完整字段，尤其不能遗漏 narrative_goal、plot_points、key_characters、key_locations、emotional_arc。
-请直接输出 JSON，不要解释。"""
-
-        user_msg = f"""<STORY_CONTEXT>
-{"".join(context_parts)}
-</STORY_CONTEXT>
-
-【全书网格】
-- 总章数：{target_chapters} 章
-- 结构：{parts} 部 × {volumes_per_part} 卷/部 × {acts_per_volume} 幕/卷
-- 平均每幕：约 {avg_chapters_per_act} 章
-
-{chr(10).join(scope_lines)}
-
-请仅返回当前卷相关节点的 JSON：
-{{
-  "node_updates": [
-    {{
-      "node_id": "{current_part["node_id"]} 或 {current_volume["node_id"]} 或 {act_scope[0]["node_id"] if act_scope else 'A1_1_1'}",
-      "title": "节点标题",
-      "description": "节点描述",
-      "estimated_chapters": 5,
-      "narrative_goal": "仅 Act 必填，不能为空",
-      "plot_points": ["仅 Act 使用，至少 2 条"],
-      "key_characters": ["仅 Act 使用，至少 1 条"],
-      "key_locations": ["仅 Act 使用，至少 1 条"],
-      "emotional_arc": "仅 Act 使用，不能为空",
-      "setup_for": ["仅 Act 使用"],
-      "payoff_from": ["仅 Act 使用"]
-    }}
-  ]
-}}
-
-要求：
-1. 只返回当前卷涉及的 node_updates。
-2. 当前卷内每个 Act 都必须返回一条更新。
-3. 每个 Act 的 narrative_goal、plot_points、key_characters、key_locations、emotional_arc 都不能为空。
-4. 不要新增或删除节点。"""
-        return Prompt(system=system_msg, user=user_msg)
+        return self._render_planning_prompt(
+            PLANNING_MACRO_VOLUME,
+            {
+                "worldview_context": "".join(context_parts),
+                "target_chapters": target_chapters,
+                "parts": parts,
+                "volumes_per_part": volumes_per_part,
+                "acts_per_volume": acts_per_volume,
+                "avg_chapters_per_act": avg_chapters_per_act,
+                "scope_block": "\n".join(scope_lines),
+                "node_id_example": (
+                    f'{current_part["node_id"]} 或 {current_volume["node_id"]} 或 '
+                    f'{act_scope[0]["node_id"] if act_scope else "A1_1_1"}'
+                ),
+            },
+        )
 
     def _build_precise_repair_prompt(
         self,
@@ -2367,12 +2326,6 @@ class ContinuousPlanningService:
         return self._render_planning_prompt(
             PLANNING_MACRO_REPAIR,
             variables,
-            fallback_system="你是小说结构补全助手。请只补齐缺失字段并输出 node_updates JSON。",
-            fallback_user=(
-                f"{variables['worldview_context']}\n\n【待补全幕】\n"
-                f"{variables['incomplete_acts_block']}\n\n"
-                '{"node_updates":[{"node_id":"A1_1_1","narrative_goal":"","plot_points":[]}]}'
-            ),
         )
 
     def _build_macro_planning_prompt(self, bible_context: Dict, target_chapters: int, structure_preference: Dict) -> Prompt:
@@ -2420,11 +2373,6 @@ class ContinuousPlanningService:
         return self._render_planning_prompt(
             PLANNING_ACT,
             {"context": context, "chapter_count": chapter_count},
-            fallback_system="你是幕级章节规划编辑。请输出纯 JSON，不要解释。",
-            fallback_user=(
-                f"{context}\n\n请规划 {chapter_count} 个章节。\n"
-                '{"chapters":[{"number":1,"title":"","outline":"","characters":[],"locations":[]}]}'
-            ),
         )
 
     async def _get_previous_acts_summary(self, act_node: StoryNode) -> Optional[str]:
@@ -2602,12 +2550,6 @@ class ContinuousPlanningService:
         dual_track_context: Dict[str, str],
     ) -> Prompt:
         """构建双轨融合的下一幕生成 Prompt"""
-        
-        system = self._get_cpms_system(
-            "continuous-planning-next-act",
-            "你是一位资深的小说结构设计师，擅长在长篇叙事中推进剧情。\n你的任务是为下一幕设计详细的内容规划，确保：\n1. 与前文保持连贯，不出现时间线或人物状态矛盾\n2. 有意识地回收或推进已有伏笔\n3. 设置新的冲突和悬念\n\n请直接输出 JSON 格式，不要添加解释性文字。",
-        )
-        
         # 组装双轨上下文
         context_parts = []
         
@@ -2625,27 +2567,14 @@ class ContinuousPlanningService:
         
         context_block = "\n\n".join(context_parts) if context_parts else "暂无前文上下文"
         
-        user = f"""【双轨上下文】
-{context_block}
-
-【当前幕信息】
-幕标题：{current_act.title}
-幕描述：{current_act.description or '无'}
-幕号：第 {current_act.number} 幕
-
-【任务】
-请生成第 {current_act.number + 1} 幕的详细规划。
-
-【输出要求】
-请输出 JSON 格式：
-{{
-  "title": "幕标题（动词+名词，暗示冲突）",
-  "description": "幕简介（100-200字，包含核心事件、冲突、转折）",
-  "suggested_chapter_count": 预估章数（整数）,
-  "key_events": ["事件1", "事件2"],
-  "narrative_arc": "叙事弧线（如：紧张→爆发→暂缓）",
-  "foreshadow_to_resolve": ["需要回收的伏笔"],
-  "foreshadow_to_plant": ["需要埋下的新伏笔"]
-}}"""
-        
-        return Prompt(system=system, user=user)
+        rendered = render_prompt(
+            PLANNING_NEXT_ACT_DUAL_TRACK,
+            {
+                "context_block": context_block,
+                "current_act_title": current_act.title,
+                "current_act_description": current_act.description or "无",
+                "current_act_number": current_act.number,
+                "next_act_number": current_act.number + 1,
+            },
+        )
+        return Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))

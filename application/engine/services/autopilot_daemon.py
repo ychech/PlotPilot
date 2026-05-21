@@ -29,7 +29,11 @@ from application.engine.services.background_task_service import BackgroundTaskSe
 from application.workflows.auto_novel_generation_workflow import AutoNovelGenerationWorkflow
 from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
 from application.engine.services.style_constraint_builder import build_style_summary
-from application.ai.llm_output_sanitize import strip_reasoning_artifacts
+from application.ai.llm_output_sanitize import (
+    normalize_prose_punctuation,
+    strip_prose_control_artifacts,
+    strip_reasoning_artifacts,
+)
 from application.ai.prose_fragment_aggregator import aggregate_inline_prose_fragments
 from application.ai.llm_retry_policy import LLM_MAX_TOTAL_ATTEMPTS
 from application.workflows.beat_continuation import format_prior_draft_for_prompt
@@ -55,6 +59,9 @@ VOICE_REWRITE_MAX_ATTEMPTS = LLM_MAX_TOTAL_ATTEMPTS
 VOICE_REWRITE_THRESHOLD = 0.68
 VOICE_WARNING_THRESHOLD_FALLBACK = 0.75
 AUTOPILOT_PROCESS_LOCK_TTL_SECONDS = 30 * 60
+ACT_PLANNING_TIMEOUT_SECONDS = 180
+FALLBACK_ACT_CHAPTER_PLAN_MIN = 3
+FALLBACK_ACT_CHAPTER_PLAN_MAX = 12
 
 
 class AutopilotDaemon:
@@ -1416,10 +1423,33 @@ class AutopilotDaemon:
                 )
             plan_result: Dict[str, Any] = {}
             try:
-                plan_result = await self.planning_service.plan_act_chapters(
-                    act_id=target_act.id,
-                    custom_chapter_count=chapter_budget
+                logger.info(
+                    f"[{novel.novel_id}] 幕 {target_act_number} 开始生成章节规划 "
+                    f"act_id={target_act.id} chapter_budget={chapter_budget}"
                 )
+                plan_result = await asyncio.wait_for(
+                    self.planning_service.plan_act_chapters(
+                        act_id=target_act.id,
+                        custom_chapter_count=chapter_budget,
+                    ),
+                    timeout=ACT_PLANNING_TIMEOUT_SECONDS,
+                )
+                logger.info(
+                    f"[{novel.novel_id}] 幕 {target_act_number} 章节规划返回 "
+                    f"success={plan_result.get('success') if isinstance(plan_result, dict) else None} "
+                    f"chapters={len(plan_result.get('chapters') or []) if isinstance(plan_result, dict) else 0}"
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"[{novel.novel_id}] 幕 {target_act_number} 章节规划超时 "
+                    f"({ACT_PLANNING_TIMEOUT_SECONDS}s)，本轮停止等待，稍后重试"
+                )
+                plan_result = {
+                    "success": False,
+                    "act_id": target_act.id,
+                    "chapters": [],
+                    "error": f"timeout after {ACT_PLANNING_TIMEOUT_SECONDS}s",
+                }
             except Exception as e:
                 logger.warning(
                     f"[{novel.novel_id}] plan_act_chapters 未捕获异常: {e}",
@@ -1434,9 +1464,19 @@ class AutopilotDaemon:
             raw = plan_result.get("chapters")
             chapters_data: List[Dict[str, Any]] = raw if isinstance(raw, list) else []
             if not chapters_data:
-                # 不再创建占位章节，直接报错停止
+                chapters_data = self._build_fallback_act_chapter_plan(
+                    target_act=target_act,
+                    requested_count=chapter_budget,
+                    act_number=target_act_number,
+                )
+                logger.warning(
+                    f"[{novel.novel_id}] 幕 {target_act_number} 未得到有效章节规划，"
+                    f"已使用本地降级规划 chapters={len(chapters_data)}"
+                )
+
+            if not chapters_data:
                 logger.error(
-                    f"[{novel.novel_id}] 幕 {target_act_number} 规划失败：未得到有效章节规划"
+                    f"[{novel.novel_id}] 幕 {target_act_number} 规划失败：降级后仍无有效章节"
                 )
                 novel.consecutive_error_count = (novel.consecutive_error_count or 0) + 1
                 if novel.consecutive_error_count >= 3:
@@ -1481,6 +1521,126 @@ class AutopilotDaemon:
             logger.info(
                 f"[{novel.novel_id}] 第 {target_act_number} 幕章节节点已存在，进入写作"
             )
+
+    def _build_fallback_act_chapter_plan(
+        self,
+        *,
+        target_act: StoryNode,
+        requested_count: Any,
+        act_number: int,
+    ) -> List[Dict[str, Any]]:
+        """幕级规划 LLM 不可用时，用幕摘要提炼出可写的章节规划。"""
+        try:
+            count = int(requested_count)
+        except (TypeError, ValueError):
+            count = FALLBACK_ACT_CHAPTER_PLAN_MIN
+        count = max(
+            FALLBACK_ACT_CHAPTER_PLAN_MIN,
+            min(count, FALLBACK_ACT_CHAPTER_PLAN_MAX),
+        )
+
+        act_title = self._clean_plan_text(target_act.title) or f"第{act_number}幕"
+        source_parts = [
+            self._clean_plan_text(target_act.description),
+            "；".join(self._clean_plan_text(x) for x in (target_act.key_events or []) if x),
+            self._clean_plan_text(target_act.narrative_arc),
+            "；".join(self._clean_plan_text(x) for x in (target_act.conflicts or []) if x),
+        ]
+        source = "；".join(part for part in source_parts if part)
+        beats = self._split_fallback_plan_beats(source)
+        if not beats:
+            beats = [
+                "建立主角当前处境与直接目标",
+                "引入外部压力，迫使主角做出第一次选择",
+                "让选择付出代价，并把矛盾推向下一阶段",
+            ]
+
+        chapters: List[Dict[str, Any]] = []
+        progress_labels = [
+            "开端",
+            "试探",
+            "压迫",
+            "转折",
+            "代价",
+            "反击",
+            "追索",
+            "失衡",
+            "逼近",
+            "摊牌",
+            "余波",
+            "钩子",
+        ]
+
+        for idx in range(count):
+            if idx < len(beats):
+                main = beats[idx]
+                synthetic_phase = False
+            else:
+                anchor = beats[idx % len(beats)]
+                label = progress_labels[idx] if idx < len(progress_labels) else f"推进{idx + 1}"
+                main = f"{label}阶段继续推进{act_title}，围绕“{anchor}”制造新的阻力、选择与后果"
+                synthetic_phase = True
+            prev_hint = beats[idx - 1] if idx > 0 and idx - 1 < len(beats) else ""
+            next_hint = beats[idx + 1] if idx + 1 < len(beats) else ""
+            label = progress_labels[idx] if idx < len(progress_labels) else f"推进{idx + 1}"
+            title_seed = label if synthetic_phase else (self._short_title_seed(main) or label)
+            title = f"第{idx + 1}章：{title_seed}"
+
+            outline_parts = [f"围绕“{act_title}”推进：{main}。"]
+            if prev_hint:
+                outline_parts.append(f"承接上一章的后果：{prev_hint}。")
+            if next_hint:
+                outline_parts.append(f"结尾留下下一步压力：{next_hint}。")
+            if idx == count - 1:
+                outline_parts.append("收束本幕核心冲突，同时抛出进入下一幕的明确悬念。")
+
+            chapters.append({
+                "number": idx + 1,
+                "title": title,
+                "outline": "".join(outline_parts),
+                "metadata": {
+                    "planning_source": "local_fallback",
+                    "act_id": target_act.id,
+                },
+            })
+        return chapters
+
+    def _split_fallback_plan_beats(self, text: str) -> List[str]:
+        cleaned = self._clean_plan_text(text)
+        if not cleaned:
+            return []
+        candidates = [
+            self._clean_plan_text(piece)
+            for piece in re.split(r"[。！？!?；;，,、\n]+", cleaned)
+        ]
+        beats: List[str] = []
+        seen = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            if len(candidate) > 90:
+                candidate = candidate[:90].rstrip("，,、：:") + "..."
+            beats.append(candidate)
+        return beats
+
+    def _clean_plan_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"^\s*[\[【][^\]】]{1,80}[\]】]\s*", "", text)
+        return text.strip(" \t\r\n。；;，,")
+
+    def _short_title_seed(self, text: str) -> str:
+        cleaned = self._clean_plan_text(text)
+        cleaned = re.sub(r"^[^：:]{1,16}[：:]", "", cleaned).strip()
+        cleaned = re.sub(r"[“”\"'《》]", "", cleaned)
+        parts = [p for p in re.split(r"[，,、 ]+", cleaned) if p]
+        seed = parts[0] if parts else cleaned
+        if len(seed) > 10:
+            seed = seed[:10]
+        return seed or ""
 
     async def _handle_writing(self, novel: Novel):
         """处理写作（节拍级幂等落库 + 章节完整性保证）
@@ -1654,7 +1814,7 @@ class AutopilotDaemon:
                 logger.warning(f"prepare_chapter_generation 失败，尝试降级：{e}")
                 try:
                     bundle = self.chapter_workflow.build_fallback_chapter_bundle(
-                        novel.novel_id.value, chapter_num, outline, scene_director=None, max_tokens=20000,
+                        novel.novel_id.value, chapter_num, outline, scene_director=None,
                     )
                     context = bundle["context"]
                 except Exception as e2:
@@ -1663,7 +1823,7 @@ class AutopilotDaemon:
         if bundle is None and self.context_builder:
             try:
                 context = self.context_builder.build_context(
-                    novel_id=novel.novel_id.value, chapter_number=chapter_num, outline=outline, max_tokens=20000,
+                    novel_id=novel.novel_id.value, chapter_number=chapter_num, outline=outline, max_tokens=5000,
                 )
             except Exception as e:
                 logger.warning(f"ContextBuilder.build_context 失败：{e}")
@@ -1836,6 +1996,30 @@ class AutopilotDaemon:
             cidx = novel.current_beat_index or 0
             # 仅用索引判断；beats_completed 曾可能被错误置位，不能作为提前结章依据
             beats_all_done = nb == 0 or cidx >= nb
+            if len(existing_content) >= int(target_word_count * 0.88):
+                closure_reasons = self._assess_chapter_final_closure(
+                    existing_content, outline, target_word_count
+                )
+                if closure_reasons:
+                    existing_content, closure_ok = await self._repair_chapter_final_closure(
+                        novel=novel,
+                        chapter_num=chapter_num,
+                        outline=outline,
+                        content=existing_content,
+                        reasons=closure_reasons,
+                    )
+                    if not closure_ok:
+                        await self._upsert_chapter_content(
+                            novel, next_chapter_node, existing_content, status="draft"
+                        )
+                        self._flush_novel(novel)
+                        logger.warning(
+                            f"[{novel.novel_id}] 第 {chapter_num} 章已有长稿但结尾修复后仍未闭环，"
+                            f"保持 draft：{'; '.join(closure_reasons)}"
+                        )
+                        return
+                # 长度已接近目标时，优先把当前稿修尾收章，避免重启后从第 1 拍重复扩写。
+                beats_all_done = True
             if nb > 0 and not beats_all_done:
                 logger.info(
                     f"[{novel.novel_id}] 章节 {chapter_num} 已有 {len(existing_content)} 字 "
@@ -2060,7 +2244,7 @@ class AutopilotDaemon:
                         voice_anchors=voice_anchors,
                         chapter_draft_so_far=accumulated_content,
                     )
-                    max_tokens = max(4096, min(120000, int(adjusted_target * 3.2) + 1200))
+                    max_tokens = max(8000, min(120000, int(adjusted_target * 4.8) + 5000))
                     cfg = GenerationConfig(max_tokens=max_tokens, temperature=0.85)
                     beat_content = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel)
                 else:
@@ -2069,6 +2253,7 @@ class AutopilotDaemon:
                         novel=novel, voice_anchors=voice_anchors,
                         chapter_draft_so_far=accumulated_content,
                     )
+                beat_content = self._finalize_autopilot_prose(beat_content)
 
                 if beat_content.strip():
                     # 截断安全网：超出硬上限时，按书目偏好选择智能截断或字符硬截断
@@ -2239,12 +2424,13 @@ class AutopilotDaemon:
                     style_summary=bundle["style_summary"],
                     voice_anchors=voice_anchors,
                 )
-                cfg = GenerationConfig(max_tokens=3000, temperature=0.85)
+                cfg = GenerationConfig(max_tokens=max(12000, min(120000, int(target_word_count * 4.8) + 6000)), temperature=0.85)
                 beat_content = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel)
             else:
                 beat_content = await self._stream_one_beat(
                     outline, context, None, None, novel=novel, voice_anchors=voice_anchors
                 )
+            beat_content = self._finalize_autopilot_prose(beat_content)
             if not self._is_still_running(novel):
                 logger.info(f"[{novel.novel_id}] 用户已停止，单段生成已中断")
                 novel.current_beat_index = 0
@@ -2287,6 +2473,7 @@ class AutopilotDaemon:
         # 检测内容是否完整（以句号等结束符结尾）
         ending_pattern = r'[。！？…）】》"\'』」]$'
         content_complete = bool(re.search(ending_pattern, chapter_content.strip()))
+        basic_closure_reasons = self._assess_basic_chapter_ending(chapter_content)
 
         # 主阈值：72% 以下视为「明显未写满」；88% 视为「字数达标」
         min_word_threshold = int(target_word_count * 0.72)
@@ -2373,6 +2560,12 @@ class AutopilotDaemon:
                         f"[{novel.novel_id}] ⚠️ 第 {chapter_num} 章字数已高 "
                         f"({int(actual_word_count / target_word_count * 100)}%)，"
                         f"但节拍未全部产出 ({beats_completed_count}/{total_beats_count})，不结章"
+                    )
+                elif basic_closure_reasons:
+                    should_complete = False
+                    logger.warning(
+                        f"[{novel.novel_id}] ⚠️ 第 {chapter_num} 章字数已达标，"
+                        f"但结尾未完整：{'; '.join(basic_closure_reasons)}"
                     )
                 else:
                     should_complete = True
@@ -2558,6 +2751,8 @@ class AutopilotDaemon:
         if not text:
             return ["正文为空"]
 
+        basic_reasons = self._assess_basic_chapter_ending(text)
+
         if self.chapter_workflow:
             reasons: List[str] = []
             try:
@@ -2575,18 +2770,15 @@ class AutopilotDaemon:
                         outline=outline,
                     )
                 )
+                reasons = basic_reasons + reasons
                 return list(dict.fromkeys(reasons))
             except Exception as e:
                 logger.debug("章节结尾闭环检查调用 workflow 失败，使用本地降级规则: %s", e)
 
         import re
 
-        reasons = []
+        reasons = list(basic_reasons)
         tail = text[-560:]
-        if not re.search(r'[。！？…）】》"\'』」]$', text):
-            reasons.append("章节结尾疑似句子未写完")
-        if text.count("“") != text.count("”") or text.count("「") != text.count("」"):
-            reasons.append("章节结尾疑似对白未闭合")
 
         result_pattern = (
             r"(确认|证实|完成|结束|落定|恢复|明白|看清|认出|拿到|失去|付出|代价|结果|失败|成功|"
@@ -2616,6 +2808,27 @@ class AutopilotDaemon:
                 reasons.append("章节结尾停在新事件刚出现的位置，缺少阶段性结果")
         return list(dict.fromkeys(reasons))
 
+    def _assess_basic_chapter_ending(self, content: str) -> List[str]:
+        """快速检查章末是否存在明显截断，不依赖 workflow。"""
+        text = (content or "").strip()
+        if not text:
+            return ["正文为空"]
+
+        reasons: List[str] = []
+        if not re.search(r'[。！？…）】》"\'』」]$', text):
+            reasons.append("章节结尾疑似句子未写完")
+        if text.count("“") != text.count("”") or text.count("「") != text.count("」"):
+            reasons.append("章节结尾疑似对白未闭合")
+        if re.search(r"(抬起头|低下头|转过身|张开口|刚要|正要|准备|看见|听见|发现|意识到)$", text[-80:]):
+            reasons.append("章节结尾停在动作或发现刚开始的位置")
+        return reasons
+
+    def _finalize_autopilot_prose(self, raw: str) -> str:
+        """自动托管正文统一清洗：思维链/状态面板/破折号模板感。"""
+        return normalize_prose_punctuation(
+            strip_prose_control_artifacts(strip_reasoning_artifacts(raw or ""))
+        ).strip()
+
     async def _repair_chapter_final_closure(
         self,
         *,
@@ -2633,18 +2846,7 @@ class AutopilotDaemon:
         if not self._is_still_running(novel):
             return content, False
 
-        # 纯截断问题先尝试截到最近完整句，避免为了补标点额外发起 LLM。
         reason_text = "；".join(str(r) for r in reasons)
-        if "阶段性结果" not in reason_text and (
-            "未写完" in reason_text or "对白未闭合" in reason_text
-        ):
-            closed = self._fallback_close_sentence(text)
-            if not self._assess_chapter_final_closure(
-                closed,
-                outline,
-                max(1, len(closed)),
-            ):
-                return closed, True
 
         logger.info(
             "[%s] 第 %s 章触发章末闭环修复：%s",
@@ -2671,17 +2873,17 @@ class AutopilotDaemon:
                 f"【章节末尾】\n{tail}\n\n"
                 "请只输出要追加在原文后面的续写段落，220-520字。\n"
                 "要求：\n"
-                "1. 先让本章核心事件完成阶段性结果：信息确认、目标成败、代价显现、角色选择、关系变化、危机解决或危机升级，至少满足一种。\n"
-                "2. 可以保留下一章钩子，但钩子必须落在本章结果之后。\n"
-                "3. 不要停在刚开口、门刚开、提示刚亮、异象刚发生、动作刚开始的位置。\n"
-                "4. 用动作、对白或画面收束，不要写标题，不要解释。"
+                "1. 从最后一句最后一个动作接着写，保留原文主体，不裁掉、不改写前文。\n"
+                "2. 先让本章核心事件完成阶段性结果：信息确认、目标成败、代价显现、角色选择、关系变化、危机解决或危机升级，至少满足一种。\n"
+                "3. 结尾要有下一章钩子，但钩子落在本章结果之后，用具体动作、对白、物件变化或画面收束。\n"
+                "4. 避免破折号、八股总结句、规则复述、标题和解释；不要停在刚开口、门刚开、提示刚亮、异象刚发生、动作刚开始的位置。"
             ),
         )
 
         try:
             cfg = GenerationConfig(max_tokens=900, temperature=0.72)
             result = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel)
-            addition = strip_reasoning_artifacts(result or "").strip()
+            addition = self._finalize_autopilot_prose(result or "")
             addition = re.sub(r"^(续写段落|追加内容|结尾修复)[:：]\s*", "", addition).strip()
             if not addition:
                 return content, False
@@ -3506,8 +3708,17 @@ class AutopilotDaemon:
             logger.warning("[%s] 文风定向修文失败（attempt=%d）：%s", novel.novel_id, attempt, e)
             return None
 
-        rewritten = strip_reasoning_artifacts((result.content or "").strip())
+        rewritten = self._finalize_autopilot_prose(result.content or "")
         if not rewritten:
+            return None
+        min_len = int(len((content or "").strip()) * 0.92)
+        if len(rewritten.strip()) < min_len:
+            logger.warning(
+                "[%s] 文风定向修文结果明显缩水，丢弃本次改写：%d < %d",
+                novel.novel_id,
+                len(rewritten.strip()),
+                min_len,
+            )
             return None
         return rewritten
 
@@ -3749,10 +3960,11 @@ class AutopilotDaemon:
         stop_detected = asyncio.Event()
         watch_task = None
         idle_watch_task = None
+        producer_task = None
         nid = getattr(novel.novel_id, "value", novel.novel_id) if novel else None
 
-        # 批量推送缓冲
-        chunk_buffer: List[str] = []
+        # 流式推送已清洗正文的增量，避免状态面板/分镜标签在前端闪现。
+        stream_pushed_content = ""
         last_push_time = time.time()
         last_chunk_time = time.time()  # 追踪最后一次收到数据的时间
         # 🔥 高频小批量推送：实现真正的流式打字机效果
@@ -3832,8 +4044,52 @@ class AutopilotDaemon:
         # 启动空闲超时检测
         idle_watch_task = asyncio.create_task(_watch_idle_timeout())
 
+        chunk_queue: asyncio.Queue = asyncio.Queue()
+        stream_done = object()
+
+        async def _produce_stream() -> None:
+            try:
+                async for chunk in self.llm_service.stream_generate(prompt, config):
+                    await chunk_queue.put(chunk)
+                    if stop_detected.is_set():
+                        break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await chunk_queue.put(exc)
+            finally:
+                await chunk_queue.put(stream_done)
+
+        producer_task = asyncio.create_task(_produce_stream())
+
+        async def _flush_streaming_delta(*, force: bool = False) -> None:
+            nonlocal stream_pushed_content, last_push_time
+            if novel is None:
+                return
+            sanitized_content = self._finalize_autopilot_prose(content)
+            if sanitized_content.startswith(stream_pushed_content):
+                delta = sanitized_content[len(stream_pushed_content):]
+            else:
+                delta = ""
+            if delta:
+                await self._push_streaming_chunk(novel.novel_id.value, delta)
+                stream_pushed_content = sanitized_content
+                last_push_time = time.time()
+            elif force:
+                stream_pushed_content = sanitized_content
+
         try:
-            async for chunk in self.llm_service.stream_generate(prompt, config):
+            while True:
+                if stop_detected.is_set():
+                    break
+                try:
+                    chunk = await asyncio.wait_for(chunk_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if chunk is stream_done:
+                    break
+                if isinstance(chunk, Exception):
+                    raise chunk
                 if stop_detected.is_set():
                     break
                 content += chunk
@@ -3841,16 +4097,10 @@ class AutopilotDaemon:
 
                 # 🔧 优化：高频小批量推送，实现流式打字机效果
                 if novel is not None and chunk:
-                    chunk_buffer.append(chunk)
                     current_time = time.time()
                     # 定期推送（每 0.15 秒），让前端有时间渲染
                     if current_time - last_push_time >= CHUNK_PUSH_INTERVAL:
-                        await self._push_streaming_chunk(novel.novel_id.value, "".join(chunk_buffer))
-                        chunk_buffer.clear()
-                        last_push_time = current_time
-
-                if stop_detected.is_set():
-                    break
+                        await _flush_streaming_delta()
         except asyncio.CancelledError:
             logger.info(f"[{nid}] 流式生成被取消")
             raise
@@ -3859,10 +4109,16 @@ class AutopilotDaemon:
             raise
         finally:
             # 🔧 确保推送剩余的 chunks
-            if novel is not None and chunk_buffer:
-                await self._push_streaming_chunk(novel.novel_id.value, "".join(chunk_buffer))
+            if novel is not None:
+                await _flush_streaming_delta(force=True)
 
             stop_detected.set()
+            if producer_task is not None and not producer_task.done():
+                producer_task.cancel()
+                try:
+                    await producer_task
+                except asyncio.CancelledError:
+                    pass
             if watch_task is not None:
                 watch_task.cancel()
                 try:
@@ -3879,7 +4135,7 @@ class AutopilotDaemon:
         if novel is not None:
             self._merge_autopilot_status_from_db(novel)
 
-        return strip_reasoning_artifacts(content)
+        return self._finalize_autopilot_prose(content)
 
     async def _push_streaming_chunk(self, novel_id: str, chunk: str):
         """推送增量文字到全局流式队列，供 SSE 接口消费
@@ -4166,14 +4422,15 @@ class AutopilotDaemon:
 
         # 字数控制策略（与主流程一致）
         max_tokens = (
-            max(4096, min(120000, int(beat.target_words * 3.2) + 1200))
+            max(8000, min(120000, int(beat.target_words * 4.8) + 5000))
             if beat
-            else 4096
+            else 12000
         )
 
         prompt = Prompt(system=system, user="\n".join(user_parts))
         config = GenerationConfig(max_tokens=max_tokens, temperature=0.85)
-        return await self._stream_llm_with_stop_watch(prompt, config, novel=novel)
+        text = await self._stream_llm_with_stop_watch(prompt, config, novel=novel)
+        return self._finalize_autopilot_prose(text)
 
     async def _upsert_chapter_content(self, novel, chapter_node, content: str, status: str):
         """最小事务：只更新章节内容，不涉及其他表

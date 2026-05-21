@@ -18,9 +18,8 @@ variables:
   type: string
   required: true
 - name: forbidden_patterns
-  desc: 仍然禁止的模式列表
+  desc: 高风险模式列表
   type: string
   required: true
 id: anti-ai-allowlist-explain
 sort_order: 36
-

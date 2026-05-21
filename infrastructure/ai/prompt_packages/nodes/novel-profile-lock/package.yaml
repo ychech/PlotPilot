@@ -1,0 +1,40 @@
+name: Novel profile lock
+category: world
+source: application/core/novel_profile_lock.py::build_novel_profile_lock()
+description: Render immutable novel profile lock from saved story seed
+builtin: true
+tags:
+- novel
+- profile
+- lock
+variables:
+- name: title
+  desc: Novel title
+  type: string
+  default: ''
+- name: genre
+  desc: Genre or track extracted from premise metadata
+  type: string
+  default: ''
+- name: world_tone
+  desc: Worldbuilding tone extracted from premise metadata
+  type: string
+  default: ''
+- name: premise
+  desc: Story premise display text
+  type: string
+  default: ''
+- name: target_words
+  desc: Target total words
+  type: string
+  default: ''
+- name: target_chapters
+  desc: Target chapter count
+  type: string
+  default: ''
+- name: chapter_words
+  desc: Target words per chapter
+  type: string
+  default: ''
+id: novel-profile-lock
+sort_order: 10

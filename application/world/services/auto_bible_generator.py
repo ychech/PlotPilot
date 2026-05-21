@@ -3,6 +3,7 @@ import logging
 import json
 import uuid
 import re
+import inspect
 from typing import Dict, Any, AsyncIterator
 from datetime import datetime
 from domain.ai.services.llm_service import LLMService, GenerationConfig
@@ -21,9 +22,11 @@ from infrastructure.persistence.database.triple_repository import TripleReposito
 from domain.shared.exceptions import EntityNotFoundError
 from domain.novel.value_objects.novel_id import NovelId
 from infrastructure.ai.prompt_keys import (
-    BIBLE_ALL, BIBLE_WORLDBUILDING, BIBLE_CHARACTERS, BIBLE_LOCATIONS,
+    BIBLE_ALL, BIBLE_CHAIN_CONTEXT, BIBLE_CHARACTERS, BIBLE_LOCATIONS,
     BIBLE_STYLE_CONVENTION, BIBLE_WORLDBUILDING_DIMENSION, BIBLE_WORLDBUILDING_FIELD,
+    LLM_JSON_RETRY_REMINDER,
 )
+from infrastructure.ai.prompt_utils import render_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -111,202 +114,6 @@ def _try_extract_next_item(buf: str, array_key: str):
         i += 1
 
     return None
-
-
-# ============================================================================
-# JSON 输出稳定性增强 - Prompt 常量
-# ============================================================================
-USER_PROMPT_SUFFIX = """
-
-请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
-```json
-"""
-
-# ============================================================================
-# CPMS 回退常量 — 当 PromptRegistry 不可用时使用
-# ============================================================================
-
-_FALLBACK_BIBLE_ALL_SYSTEM = """你是资深网文策划编辑。根据用户提供的故事创意/梗概，生成完整的人物、世界设定和世界观。
-
-**重要：description 字段必须是单行文本，不能有换行符。**
-
-要求：
-1. 深入理解故事梗概，提取核心冲突、主题、世界观
-2. 至少 3-5 个主要人物（主角、配角、对手、导师等），确保人物之间有冲突和互动
-3. 每个人物：姓名、定位（主角/配角/对手/导师）、性格特点、目标动机，以及进阶字段（public_profile、hidden_profile、mental_state、verbal_tic、idle_behavior、core_belief、voice_profile）
-4. 至少 2-3 个重要地点，符合故事背景
-5. 明确的文风公约（叙事视角、人称、基调、节奏）
-6. 完整的世界观（5维度框架）：核心法则、地理生态、社会结构、历史文化、沉浸感细节
-7. 人物和地点要符合故事类型（现代都市/古代/玄幻/科幻等）
-8. **所有 description 字段必须是单行文本**
-"""
-
-_FALLBACK_BIBLE_WORLDBUILDING_SYSTEM = """你是资深网文策划编辑。根据故事创意生成世界观和文风公约。
-
-要求：
-1. 完整的世界观（5维度框架）：核心法则、地理生态、社会结构、历史文化、沉浸感细节
-2. 明确的文风公约（叙事视角、人称、基调、节奏）
-3. 符合故事类型（现代都市/古代/玄幻/科幻等）
-"""
-
-_FALLBACK_BIBLE_ALL_USER = """故事创意：{premise}
-
-目标章节数：{target_chapters}章
-
-请根据这个故事创意，生成完整的人物、世界设定和世界观。注意：
-1. 从故事创意中提取关键信息（主角身份、核心能力、故事背景、主要冲突）
-2. 人物要有层次，不能只有主角，要有配角、对手、导师等
-3. 要有明确的冲突和对立面
-4. 世界观要清晰，地点要符合故事类型
-5. 文风公约要完整：必须覆盖叙事视角、行文人称、故事基调、推进节奏、全文氛围、对话语态、场景描写风格、情绪渲染力度八个维度。至少写3-5句话。
-6. 世界观5个维度都要填写，符合故事类型和背景
-7. 适合网文读者，有代入感
-
-请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
-```json
-{{
-  "characters": [],
-  "locations": [],
-  "style": "文风公约完整文本（3-5句，覆盖八大维度）",
-  "worldbuilding": {{}}
-}}
-```"""
-
-_FALLBACK_BIBLE_WORLDBUILDING_USER = """故事创意：{premise}
-
-目标章节数：{target_chapters}章
-
-请生成世界观和文风公约。文风公约必须覆盖叙事视角、行文人称、故事基调、推进节奏、全文氛围、对话语态、场景描写风格、情绪渲染力度八个维度，至少3-5句话。
-
-请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
-```json
-{{
-  "style": "文风公约完整文本（3-5句，覆盖八大维度）",
-  "worldbuilding": {{}}
-}}
-```"""
-
-_FALLBACK_BIBLE_CHARACTERS_SYSTEM = """你是资深网文策划编辑。基于已有世界观生成主要人物。
-
-**重要：description 字段必须是单行文本。**
-
-要求：
-1. 至少 3-5 个主要人物（主角、配角、对手、导师等）
-2. 人物要符合世界观设定
-3. 确保人物之间有冲突和互动
-4. 每个人物：姓名、定位、性格特点、目标动机
-5. 明确定义人物之间的关系（敌对、合作、师徒、亲属、暧昧等）
-6. 每个角色必须填充以下进阶字段：public_profile（公开形象）、hidden_profile（隐秘内核）、mental_state（心理状态枚举）、mental_state_reason（心理状态成因）、verbal_tic（口头禅）、idle_behavior（下意识动作）、core_belief（核心信念）、voice_profile（声线结构JSON对象，含pitch/speed/tone/signature）
-
-JSON 格式：
-{
-  "characters": [
-    {
-      "name": "人物名",
-      "role": "主角/配角/对手/导师",
-      "description": "性格、背景、目标、特点，所有内容在一行内，用逗号分隔",
-      "public_profile": "公开形象：外界看ta是什么样的——社交面具、职业身份、外在性格标签",
-      "hidden_profile": "隐秘内核：不为人知的秘密、创伤、伪装、双重身份",
-      "mental_state": "NORMAL/ANXIOUS/DEPRESSED/RESTLESS/OBSESSIVE/GUILT_RIDDEN/VENGEFUL/HOPEFUL/BROKEN/DETERMINED",
-      "mental_state_reason": "产生当前心理状态的原因，一行描述",
-      "verbal_tic": "口头禅或说话习惯",
-      "idle_behavior": "下意识小动作或待机姿态",
-      "core_belief": "核心信念/价值选择立场",
-      "voice_profile": {"pitch": "中偏低/偏高/低沉", "speed": "快/中速/慢", "tone": "冷淡/热情/慵懒/爽朗/刻薄/温和", "signature": "标志性语言特征"},
-      "relationships": [
-        {
-          "target": "目标人物名",
-          "relation": "关系类型（师徒/敌对/合作/亲属/暧昧等）",
-          "description": "关系的详细描述"
-        }
-      ]
-    }
-  ]
-}
-
-中文姓名（硬性）：
-- 禁用俗套大姓：李、王、张、刘、陈、杨、林、赵、周、吴（不得作为任何主要角色姓氏）。
-- 主要角色姓氏彼此不同；勿全员同一姓。
-- 像抽卡一样从下列姓氏池均匀随机选用（勿总选前几项）；可混用单姓与复姓。
-
-复姓卡池：欧阳、司马、上官、诸葛、慕容、司徒、司空、尉迟、公孙、东方、西门、南宫、皇甫、令狐、宇文、长孙、独孤、端木、濮阳、轩辕、即墨、闻人、申屠、太叔、呼延、钟离、澹台、公冶、宗政、完颜、耶律、拓跋、羊舌、梁丘、左丘、谷梁、乐正
-
-单姓卡池：顾、苏、沈、萧、裴、荀、喻、柏、水、窦、云、狄、贝、明、臧、计、伏、茅、庞、纪、舒、屈、祝、阮、蓝、闵、季、路、娄、危、童、颜、尹、邵、邹、郝、崔、龚、黎、易、武、戴、莫、孔、白、常、康、傅、严、魏、陶、姜、范、叶、余、潘、段、贺、毛、江、史、侯、倪、覃、温、芦、俞、安、梅、辛、管、左、薄、宁、柯、桂、柴、车、房、边、吉、饶、刁、瞿、戚、丘、米、池、滕、佟、言、蔺、栾、冷、訾、阚、茹、逄、夔、郗、隗、鄂、蓟、蒲、邰、咸、籍、楼、仇、迟、宦、艾、鱼、容、向、古、慎、戈、荆、燕、尚、农、郦、雍、却、璩、濮、扈、郏、浦、逢、步、都、耿、满、弘、匡、国、文、寇、广、禄、阙、殳、沃、利、蔚、越、隆、师、巩、厍、聂、晁、勾、敖、融、那、简、沙、乜、鞠、须、丰、巢、蒯、相、查、后、红、游、竺、权、逯、盖、益、桓、公、东、欧
-"""
-
-_FALLBACK_BIBLE_CHARACTERS_USER = """故事创意：{premise}
-
-目标章节数：{target_chapters}章
-
-已有世界观：
-{worldbuilding}
-
-请基于以上信息生成主要人物（至少3-5人）。确保人物之间有冲突和互动。
-
-请严格按照系统提示中的JSON格式输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答。"""
-
-_FALLBACK_BIBLE_LOCATIONS_USER = """故事创意：{premise}
-
-目标章节数：{target_chapters}章
-
-已有世界观：
-{worldbuilding}
-
-已有人物：
-{characters}
-
-请基于以上信息生成完整地图（至少5-10个重要地点）。地点要符合世界观设定，考虑人物活动范围。
-
-请严格按照系统提示中的JSON格式输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答。"""
-
-_FALLBACK_BIBLE_LOCATIONS_SYSTEM = """你是资深网文策划编辑。基于已有世界观和人物生成完整地图。
-
-要求：
-1. 至少 5-10 个重要地点，构成完整地图
-2. 地点要符合世界观设定
-3. 考虑人物的活动范围和故事需要
-4. 包含不同类型：城市、建筑、区域、特殊场所等
-5. 空间层级用 parent_id 表达
-"""
-
-_FALLBACK_BIBLE_DIMENSION_SYSTEM = """你是资深网文策划编辑。根据故事创意生成世界观的「{dim_label}」维度。
-
-**关键要求：**
-1. 必须严格按照指定的字段名输出，不要自创字段名
-2. 每个字段都必须填写具体、生动、有细节的内容（至少50字），不要写「待生成」或留空
-3. 内容要符合故事类型，有沉浸感和张力
-4. 字段值是纯文本字符串，不要嵌套对象
-5. 只输出JSON，不要有任何其他文字"""
-
-_FALLBACK_BIBLE_DIMENSION_USER = """故事创意：{premise}
-
-目标章节数：{target_chapters}章
-
-请生成世界观的「{dim_label}」维度。{context_block}
-
-请严格按照以下JSON格式输出，字段名不要修改，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
-```json
-{{
-{fields_desc}
-}}
-```"""
-
-_FALLBACK_BIBLE_FIELD_SYSTEM = """你是资深网文策划编辑。根据故事创意生成世界观「{dim_label}」维度中的「{field_label_cn}」字段。
-
-**关键要求：**
-1. 只生成这一个字段的内容，不要生成其他字段
-2. 内容必须具体、生动、有细节（至少80字），不要写「待生成」或留空
-3. 内容要符合故事类型，有沉浸感和张力
-4. 直接输出纯文本，不要输出JSON，不要有任何其他文字
-5. 不要与其他已生成字段的内容重复"""
-
-_FALLBACK_BIBLE_FIELD_USER = """故事创意：{premise}
-
-目标章节数：{target_chapters}章
-
-请生成世界观「{dim_label}」中的「{field_label_cn}」字段。{field_desc}{context_block}{sibling_block}
-
-直接输出这段文本即可，不要输出JSON，不要有任何解释。"""
 
 
 def parse_json_from_response(rsp: str):
@@ -648,11 +455,23 @@ class AutoBibleGenerator:
         Returns:
             生成的 Bible 数据
         """
-        premise = self._resolve_profile_premise(
+        story_premise = self._resolve_story_premise(
+            novel_id=novel_id,
+            premise=premise,
+            title=title,
+        )
+        profile_lock = self._resolve_profile_premise(
             novel_id=novel_id,
             premise=premise,
             title=title,
             target_chapters=target_chapters,
+        )
+        premise = story_premise
+        chain_context = self._build_bible_chain_context(
+            story_premise,
+            target_chapters,
+            profile_lock=profile_lock,
+            stage="bible",
         )
         logger.info(f"Generating Bible for novel: {premise[:50]}... (stage: {stage})")
 
@@ -678,8 +497,53 @@ class AutoBibleGenerator:
 
         # 2. 根据阶段生成不同内容
         if stage == "all":
-            # 一次性生成所有内容（向后兼容）
-            bible_data = await self._generate_bible_data(premise, target_chapters)
+            # 按链路生成：故事创意 -> 世界观 -> 文风 -> 人物 -> 地点。
+            world_style = await self._generate_worldbuilding_and_style(
+                premise,
+                target_chapters,
+                chain_context=chain_context,
+            )
+            worldbuilding = world_style.get("worldbuilding") or {}
+            style = world_style.get("style") or ""
+            character_context = self._build_bible_chain_context(
+                premise,
+                target_chapters,
+                profile_lock=profile_lock,
+                worldbuilding=worldbuilding,
+                style_guide=style,
+                stage="characters",
+            )
+            characters_data = await self._generate_characters(
+                premise,
+                target_chapters,
+                worldbuilding,
+                style_guide=style,
+                chain_context=character_context,
+            )
+            characters = characters_data.get("characters") or []
+            location_context = self._build_bible_chain_context(
+                premise,
+                target_chapters,
+                profile_lock=profile_lock,
+                worldbuilding=worldbuilding,
+                style_guide=style,
+                characters=characters,
+                stage="locations",
+            )
+            locations_data = await self._generate_locations(
+                premise,
+                target_chapters,
+                worldbuilding,
+                characters,
+                style_guide=style,
+                chain_context=location_context,
+            )
+            bible_data = {
+                "style": style,
+                "worldbuilding": worldbuilding,
+                "characters": characters,
+                "locations": locations_data.get("locations") or [],
+            }
             await self._save_to_bible(novel_id, bible_data)
             if self.worldbuilding_service and "worldbuilding" in bible_data:
                 await self._save_worldbuilding(novel_id, bible_data["worldbuilding"])
@@ -696,7 +560,11 @@ class AutoBibleGenerator:
 
             logger.debug("Calling _generate_worldbuilding_and_style")
             # 只生成世界观和文风
-            bible_data = await self._generate_worldbuilding_and_style(premise, target_chapters)
+            bible_data = await self._generate_worldbuilding_and_style(
+                premise,
+                target_chapters,
+                chain_context=chain_context,
+            )
             logger.debug("_generate_worldbuilding_and_style completed, keys=%s", list(bible_data.keys()))
             logger.debug("Has 'worldbuilding' key: %s, worldbuilding_service is None: %s", 'worldbuilding' in bible_data, self.worldbuilding_service is None)
             # 保存文风
@@ -731,7 +599,21 @@ class AutoBibleGenerator:
 
             # 基于已有世界观生成人物
             existing_worldbuilding = self._load_worldbuilding(novel_id)
-            bible_data = await self._generate_characters(premise, target_chapters, existing_worldbuilding)
+            style_guide = self._load_style_guide(novel_id)
+            bible_data = await self._generate_characters(
+                premise,
+                target_chapters,
+                existing_worldbuilding,
+                style_guide=style_guide,
+                chain_context=self._build_bible_chain_context(
+                    premise,
+                    target_chapters,
+                    profile_lock=profile_lock,
+                    worldbuilding=existing_worldbuilding,
+                    style_guide=style_guide,
+                    stage="characters",
+                ),
+            )
             chars_payload = bible_data.get("characters") or []
             if not chars_payload:
                 raise ValueError(
@@ -792,7 +674,23 @@ class AutoBibleGenerator:
             # 基于已有世界观和人物生成地点
             existing_worldbuilding = self._load_worldbuilding(novel_id)
             existing_characters = self._load_characters(novel_id)
-            bible_data = await self._generate_locations(premise, target_chapters, existing_worldbuilding, existing_characters)
+            style_guide = self._load_style_guide(novel_id)
+            bible_data = await self._generate_locations(
+                premise,
+                target_chapters,
+                existing_worldbuilding,
+                existing_characters,
+                style_guide=style_guide,
+                chain_context=self._build_bible_chain_context(
+                    premise,
+                    target_chapters,
+                    profile_lock=profile_lock,
+                    worldbuilding=existing_worldbuilding,
+                    style_guide=style_guide,
+                    characters=existing_characters,
+                    stage="locations",
+                ),
+            )
             locs_payload = bible_data.get("locations") or []
             if not locs_payload:
                 raise ValueError(
@@ -865,6 +763,53 @@ class AutoBibleGenerator:
             target_chapters=target_chapters,
         )
 
+    def _resolve_story_premise(
+        self,
+        *,
+        novel_id: str,
+        premise: str = "",
+        title: str = "",
+    ) -> str:
+        """Prefer the saved user premise as the raw story seed for prompt nodes."""
+        try:
+            from infrastructure.persistence.database.connection import get_database
+
+            row = get_database().fetch_one(
+                "SELECT title, premise FROM novels WHERE id = ?",
+                (novel_id,),
+            )
+            if row:
+                return (row.get("premise") or premise or title or row.get("title") or "").strip()
+        except Exception as exc:
+            logger.debug("读取小说原始创意失败，使用调用参数: %s", exc)
+
+        return (premise or title).strip()
+
+    def _build_bible_chain_context(
+        self,
+        premise: str,
+        target_chapters: int,
+        *,
+        profile_lock: str = "",
+        worldbuilding: Dict[str, Any] | None = None,
+        style_guide: str = "",
+        characters: list | None = None,
+        stage: str = "",
+    ) -> str:
+        """Build a compact, explicit upstream context block for chained Bible prompts."""
+        return render_prompt_text(
+            BIBLE_CHAIN_CONTEXT,
+            {
+                "stage": stage or "bible",
+                "target_chapters": str(target_chapters),
+                "premise": premise.strip(),
+                "profile_lock": profile_lock.strip(),
+                "worldbuilding_summary": self._summarize_worldbuilding(worldbuilding or {}),
+                "style_guide": style_guide.strip(),
+                "characters_summary": self._summarize_characters(characters or []),
+            },
+        )
+
     async def _generate_bible_data(self, premise: str, target_chapters: int) -> Dict[str, Any]:
         """使用 LLM 生成 Bible 数据和世界观"""
         from infrastructure.ai.prompt_utils import render_prompt
@@ -872,8 +817,6 @@ class AutoBibleGenerator:
         rendered = render_prompt(
             BIBLE_ALL,
             {"premise": premise, "target_chapters": str(target_chapters)},
-            fallback_system=_FALLBACK_BIBLE_ALL_SYSTEM,
-            fallback_user=_FALLBACK_BIBLE_ALL_USER,
         )
 
         bible_data = await self._call_llm_and_parse_with_retry(rendered["system"], rendered["user"])
@@ -1089,26 +1032,45 @@ class AutoBibleGenerator:
         except Exception:
             return []
 
-    async def _generate_worldbuilding_and_style(self, premise: str, target_chapters: int) -> Dict[str, Any]:
-        """只生成世界观和文风（一次性生成全部5维度，向后兼容非SSE场景）"""
-        from infrastructure.ai.prompt_utils import render_prompt
+    def _load_style_guide(self, novel_id: str) -> str:
+        """加载已有文风公约。"""
+        try:
+            bible = self.bible_service.get_bible_by_novel(novel_id)
+            if bible is None:
+                return ""
+            notes = getattr(bible, "style_notes", None) or []
+            contents = [getattr(note, "content", "") for note in notes if getattr(note, "content", "")]
+            return "\n".join(contents).strip()
+        except Exception:
+            return ""
 
-        rendered = render_prompt(
-            BIBLE_WORLDBUILDING,
-            {"premise": premise, "target_chapters": str(target_chapters)},
-            fallback_system=_FALLBACK_BIBLE_WORLDBUILDING_SYSTEM,
-            fallback_user=_FALLBACK_BIBLE_WORLDBUILDING_USER,
-        )
-
-        raw = await self._call_llm_and_parse_with_retry(rendered["system"], rendered["user"])
-        if not isinstance(raw, dict):
-            return {"style": "", "worldbuilding": {}}
-
-        style = raw.get("style") or ""
+    async def _generate_worldbuilding_and_style(
+        self,
+        premise: str,
+        target_chapters: int,
+        *,
+        chain_context: str = "",
+    ) -> Dict[str, Any]:
+        """Generate worldbuilding first, then derive the style convention from it."""
         worldbuilding = await self._generate_worldbuilding_field_first(
             premise,
             target_chapters,
+            chain_context=chain_context,
         )
+        style_context = self._build_bible_chain_context(
+            premise,
+            target_chapters,
+            worldbuilding=worldbuilding,
+            stage="style",
+        )
+        style = await self._generate_style(
+            premise,
+            target_chapters,
+            worldbuilding=worldbuilding,
+            chain_context="\n\n".join(part for part in [chain_context, style_context] if part),
+        )
+        if inspect.isawaitable(style):
+            style = await style
 
         return {
             "style": style.strip() if isinstance(style, str) else str(style),
@@ -1117,118 +1079,65 @@ class AutoBibleGenerator:
 
     # ── 逐维度流式生成（SSE专用） ──────────────────────────────────────
 
-    async def _generate_style(self, premise: str, target_chapters: int) -> str:
+    async def _generate_style(
+        self,
+        premise: str,
+        target_chapters: int,
+        *,
+        worldbuilding: Dict[str, Any] | None = None,
+        chain_context: str = "",
+    ) -> str:
         """Generate style convention via CPMS."""
-        from infrastructure.ai.prompt_keys import BIBLE_STYLE_CONVENTION
-        from infrastructure.ai.prompt_registry import get_prompt_registry
+        from infrastructure.ai.prompt_utils import render_prompt
 
         variables = {
             "premise": premise,
             "target_chapters": str(target_chapters),
+            "worldbuilding_summary": self._summarize_worldbuilding(worldbuilding or {}),
+            "chain_context": chain_context,
         }
 
-        registry = get_prompt_registry()
-        prompt = registry.render_to_prompt(BIBLE_STYLE_CONVENTION, variables)
-
-        if not prompt:
-            # Fallback
-            from infrastructure.ai.prompt_utils import get_prompt_system as _get_prompt_system
-            system = _get_prompt_system(BIBLE_STYLE_CONVENTION)
-            user = f"故事创意：{premise}\n\n目标章节数：{target_chapters}章\n\n请生成文风公约。直接输出文本即可。"
-            prompt = Prompt(system=system, user=user)
+        rendered = render_prompt(BIBLE_STYLE_CONVENTION, variables)
+        prompt = Prompt(system=rendered["system"], user=rendered["user"])
 
         # max_tokens 只设宽裕上限防止极端超长，正常篇幅由 prompt 中的字数指引控制
         config = GenerationConfig(max_tokens=4096, temperature=0.7)
         result = await self.llm_service.generate(prompt, config)
         return (result.content or "").strip()
 
-    # 维度定义：key → (label, field_definitions)
-    _DIMENSION_DEFS = {
-        "core_rules": {
-            "label": "核心法则",
-            "fields": {
-                "power_system": "力量体系/科技树：谁拥有力量（先天血脉/后天修炼/财富购买/科技改造）？力量的上限在哪？不同层级的能力差距有多大？弱者有没有翻盘的可能？",
-                "physics_rules": "物理规律：这个世界与地球物理有什么不同（重力、时间流速、空间结构）？是否存在洞天福地/异次元/虚拟世界？穿越者会感到什么不适？",
-                "magic_tech": "魔法/科技的运作机制：能量从哪来？释放的代价是什么（寿命/记忆/资源/道德）？有没有失控反噬的风险？泛滥还是稀缺？",
-            },
-        },
-        "geography": {
-            "label": "地理生态",
-            "fields": {
-                "terrain": "主要地形：这个世界长什么样（大陆/群岛/地下城/空中浮岛/星际殖民地）？有哪些标志性地标？地形如何塑造了文明的分布和冲突？",
-                "climate": "气候：有没有极端天气（永夜/永昼/酸雨/灵气风暴）？季节如何影响生存和剧情？气候如何塑造了当地人的性格？",
-                "resources": "资源分布：什么资源最值钱（灵石/基因药剂/稀土/信息）？资源集中在谁手里？资源不均引发了什么冲突？",
-                "ecology": "生态与生物链：有什么独特的动植物（妖兽/变异种/机械兽）？它们与人类是什么关系（猎杀/共生/驯化/恐惧）？食物链的顶端是什么？",
-            },
-        },
-        "society": {
-            "label": "社会结构",
-            "fields": {
-                "politics": "政治体制：谁在统治（帝制/议会/宗门/军阀/AI）？权力如何传递（继承/选举/武力夺取/算法指定）？有没有制衡力量？底层有没有上升通道？",
-                "economy": "经济模式：钱从哪来？普通人靠什么活（种田/任务/采集/信息交易）？贫富差距有多大？有没有地下经济/黑市？",
-                "class_system": "阶级系统：社会分几层？阶层之间能不能流动（通过考试/婚姻/战斗/科技）？底层认命还是反抗？上层有什么特权？",
-            },
-        },
-        "culture": {
-            "label": "历史文化",
-            "fields": {
-                "history": "关键历史事件：世界怎么变成今天这样的（战争/灾变/发现/背叛）？谁在书写历史——赢家还是被抹去的失败者？有没有被篡改的官方叙事？",
-                "religion": "宗教信仰：人们信什么（神/天道/科学/祖先/AI）？宗教是统治工具还是反抗旗帜？不信的人会怎样？有没有神迹真实发生过？",
-                "taboos": "文化禁忌：什么东西绝对不能碰（亵渎祖先/跨阶级通婚/说出真名/接触异族）？犯禁的人会怎样？这些禁忌背后藏着什么秘密？",
-            },
-        },
-        "daily_life": {
-            "label": "沉浸感细节",
-            "fields": {
-                "food_clothing": "衣食住行：普通人吃什么、穿什么、住什么？不同阶层的生活差异有多大（把差距写具体）？有什么这个世界独有的日常物品？",
-                "language_slang": "俚语与方言：不同阶层/职业/地区说话有什么不同？有什么这个世界独有的骂人话、口头禅、行话？初次见面怎么打招呼？",
-                "entertainment": "娱乐与消遣：普通人怎么放松（赌场/茶馆/斗兽/虚拟游戏/地下格斗）？什么娱乐是禁忌的？有权势的人玩什么？",
-            },
-        },
-    }
-
-    _FIELD_ORDER: list[tuple[str, str]] = [
-        ("core_rules", "power_system"),
-        ("core_rules", "physics_rules"),
-        ("core_rules", "magic_tech"),
-        ("geography", "terrain"),
-        ("geography", "climate"),
-        ("geography", "resources"),
-        ("geography", "ecology"),
-        ("society", "politics"),
-        ("society", "economy"),
-        ("society", "class_system"),
-        ("culture", "history"),
-        ("culture", "religion"),
-        ("culture", "taboos"),
-        ("daily_life", "food_clothing"),
-        ("daily_life", "language_slang"),
-        ("daily_life", "entertainment"),
-    ]
-
     def get_worldbuilding_field_plan(self) -> list[dict[str, str]]:
         """世界观核心字段生成计划。"""
-        plan: list[dict[str, str]] = []
-        for dim_key, field_key in self._FIELD_ORDER:
-            dim_def = self._DIMENSION_DEFS[dim_key]
-            plan.append(
-                {
-                    "dimension": dim_key,
-                    "dimension_label": dim_def["label"],
-                    "field": field_key,
-                    "field_label": self._FIELD_LABELS.get(field_key, field_key),
-                    "field_desc": dim_def["fields"][field_key],
-                }
-            )
-        return plan
+        from infrastructure.ai.prompt_registry import get_prompt_registry
+        try:
+            plan = get_prompt_registry().get_field(BIBLE_WORLDBUILDING_FIELD, "_field_plan", [])
+            if isinstance(plan, list) and plan:
+                return [dict(item) for item in plan if isinstance(item, dict)]
+        except Exception as exc:
+            logger.debug("读取世界观字段计划失败: %s", exc)
+        return self._load_worldbuilding_field_plan_from_package()
+
+    def _load_worldbuilding_field_plan_from_package(self) -> list[dict[str, str]]:
+        try:
+            from infrastructure.ai.prompt_seed.loader import NODES_DIR
+            path = NODES_DIR / BIBLE_WORLDBUILDING_FIELD / "extras.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            plan = data.get("_field_plan") or []
+            if isinstance(plan, list):
+                return [dict(item) for item in plan if isinstance(item, dict)]
+        except Exception as exc:
+            logger.debug("读取世界观字段计划 package 兜底失败: %s", exc)
+        return []
+
+    def _dimension_plan(self, dim_key: str) -> list[dict[str, str]]:
+        return [item for item in self.get_worldbuilding_field_plan() if item.get("dimension") == dim_key]
 
     def _normalize_dimension_for_storage(self, dim_key: str, dim_data: Any) -> Dict[str, str]:
         """只保留可入库标准字段；扩展字段留给 Bible.world_settings。"""
-        dim_def = self._DIMENSION_DEFS.get(dim_key)
-        if not dim_def or not isinstance(dim_data, dict):
+        field_plan = self._dimension_plan(dim_key)
+        if not field_plan or not isinstance(dim_data, dict):
             return {}
 
-        allowed = set(dim_def["fields"].keys())
+        allowed = {item["field"] for item in field_plan if item.get("field")}
         normalized: Dict[str, str] = {}
         rejected: list[str] = []
         for key, value in dim_data.items():
@@ -1259,16 +1168,18 @@ class AutoBibleGenerator:
         dim_key: str,
         dim_data: Dict[str, str],
         existing_worldbuilding: Dict[str, Any] | None = None,
+        chain_context: str = "",
     ) -> Dict[str, str]:
         """补齐当前维度的关键落库字段。"""
-        dim_def = self._DIMENSION_DEFS.get(dim_key)
-        if not dim_def:
+        field_plan = self._dimension_plan(dim_key)
+        if not field_plan:
             return dim_data
 
         completed = dict(dim_data)
         missing = [
             field_key
-            for field_key in dim_def["fields"]
+            for item in field_plan
+            if (field_key := item.get("field"))
             if not str(completed.get(field_key) or "").strip()
         ]
         if missing:
@@ -1282,6 +1193,7 @@ class AutoBibleGenerator:
                 field_key,
                 existing_worldbuilding,
                 completed,
+                chain_context=chain_context,
             )
             if generated:
                 completed[field_key] = generated
@@ -1291,12 +1203,15 @@ class AutoBibleGenerator:
         self,
         premise: str,
         target_chapters: int,
+        *,
+        chain_context: str = "",
     ) -> Dict[str, Dict[str, str]]:
         """按字段逐个生成世界观核心字段。"""
+        plan = self.get_worldbuilding_field_plan()
         worldbuilding: Dict[str, Dict[str, str]] = {
-            dim_key: {} for dim_key in self._DIMENSION_DEFS.keys()
+            item["dimension"]: {} for item in plan if item.get("dimension")
         }
-        for item in self.get_worldbuilding_field_plan():
+        for item in plan:
             dim_key = item["dimension"]
             field_key = item["field"]
             value = await self._generate_single_field(
@@ -1306,6 +1221,7 @@ class AutoBibleGenerator:
                 field_key,
                 worldbuilding,
                 worldbuilding.get(dim_key, {}),
+                chain_context=chain_context,
             )
             if value:
                 worldbuilding[dim_key][field_key] = value.strip()
@@ -1315,12 +1231,15 @@ class AutoBibleGenerator:
         self,
         premise: str,
         target_chapters: int,
+        *,
+        chain_context: str = "",
     ):
         """按字段流式生成世界观核心字段。"""
+        plan = self.get_worldbuilding_field_plan()
         worldbuilding: Dict[str, Dict[str, str]] = {
-            dim_key: {} for dim_key in self._DIMENSION_DEFS.keys()
+            item["dimension"]: {} for item in plan if item.get("dimension")
         }
-        for item in self.get_worldbuilding_field_plan():
+        for item in plan:
             dim_key = item["dimension"]
             field_key = item["field"]
             chunks: list[str] = []
@@ -1331,6 +1250,7 @@ class AutoBibleGenerator:
                 field_key,
                 worldbuilding,
                 worldbuilding.get(dim_key, {}),
+                chain_context=chain_context,
             ):
                 chunks.append(chunk)
                 yield {
@@ -1360,6 +1280,7 @@ class AutoBibleGenerator:
         target_chapters: int,
         dim_key: str,
         existing_worldbuilding: Dict[str, Any] | None = None,
+        chain_context: str = "",
     ) -> Dict[str, str]:
         """逐维度生成：独立调用 LLM 生成单个世界观维度，确保字段名和内容完整。
 
@@ -1372,17 +1293,17 @@ class AutoBibleGenerator:
         Returns:
             该维度的字段字典 {field_key: field_value}
         """
-        dim_def = self._DIMENSION_DEFS.get(dim_key)
-        if not dim_def:
+        field_plan = self._dimension_plan(dim_key)
+        if not field_plan:
             logger.warning("Unknown dimension key: %s", dim_key)
             return {}
 
-        dim_label = dim_def["label"]
-        fields = dim_def["fields"]
+        dim_label = field_plan[0].get("dimension_label", dim_key)
 
         # 构建字段说明
         fields_desc = "\n".join(
-            f'    "{k}": "{v}"' for k, v in fields.items()
+            f'    "{item["field"]}": "{item.get("field_desc", "")}"'
+            for item in field_plan if item.get("field")
         )
 
         # 构建已生成维度的上下文（帮助 LLM 保持一致性）
@@ -1394,8 +1315,7 @@ class AutoBibleGenerator:
                     items = ", ".join(f"{fk}: {fv}" for fk, fv in dv.items() if fv)
                     if items:
                         context_parts.append(f"- {dk}: {items}")
-            if context_parts:
-                context_block = f"\n\n已生成的其他维度（请保持一致性）：\n" + "\n".join(context_parts)
+            context_block = "\n".join(context_parts)
 
         from infrastructure.ai.prompt_utils import render_prompt
 
@@ -1407,9 +1327,8 @@ class AutoBibleGenerator:
                 "target_chapters": str(target_chapters),
                 "context_block": context_block,
                 "fields_desc": fields_desc,
+                "chain_context": chain_context,
             },
-            fallback_system=_FALLBACK_BIBLE_DIMENSION_SYSTEM,
-            fallback_user=_FALLBACK_BIBLE_DIMENSION_USER,
         )
 
         try:
@@ -1432,6 +1351,7 @@ class AutoBibleGenerator:
                 dim_key,
                 normalized,
                 existing_worldbuilding,
+                chain_context=chain_context,
             )
             return completed
         except Exception as e:
@@ -1444,6 +1364,7 @@ class AutoBibleGenerator:
         target_chapters: int,
         dim_key: str,
         existing_worldbuilding: Dict[str, Any] | None = None,
+        chain_context: str = "",
     ):
         """流式生成单个世界观维度：逐 token yield LLM 输出。
 
@@ -1459,16 +1380,16 @@ class AutoBibleGenerator:
         Yields:
             str: LLM 逐 token 输出的文本片段
         """
-        dim_def = self._DIMENSION_DEFS.get(dim_key)
-        if not dim_def:
+        field_plan = self._dimension_plan(dim_key)
+        if not field_plan:
             logger.warning("Unknown dimension key: %s", dim_key)
             return
 
-        dim_label = dim_def["label"]
-        fields = dim_def["fields"]
+        dim_label = field_plan[0].get("dimension_label", dim_key)
 
         fields_desc = "\n".join(
-            f'    "{k}": "{v}"' for k, v in fields.items()
+            f'    "{item["field"]}": "{item.get("field_desc", "")}"'
+            for item in field_plan if item.get("field")
         )
 
         context_block = ""
@@ -1479,8 +1400,7 @@ class AutoBibleGenerator:
                     items = ", ".join(f"{fk}: {fv}" for fk, fv in dv.items() if fv)
                     if items:
                         context_parts.append(f"- {dk}: {items}")
-            if context_parts:
-                context_block = f"\n\n已生成的其他维度（请保持一致性）：\n" + "\n".join(context_parts)
+            context_block = "\n".join(context_parts)
 
         from infrastructure.ai.prompt_utils import render_prompt
 
@@ -1492,9 +1412,8 @@ class AutoBibleGenerator:
                 "target_chapters": str(target_chapters),
                 "context_block": context_block,
                 "fields_desc": fields_desc,
+                "chain_context": chain_context,
             },
-            fallback_system=_FALLBACK_BIBLE_DIMENSION_SYSTEM,
-            fallback_user=_FALLBACK_BIBLE_DIMENSION_USER,
         )
 
         try:
@@ -1514,6 +1433,8 @@ class AutoBibleGenerator:
         field_key: str,
         existing_worldbuilding: Dict[str, Any] | None = None,
         existing_dim_fields: Dict[str, str] | None = None,
+        *,
+        chain_context: str = "",
     ) -> str:
         """逐字段生成：独立调用 LLM 生成单个世界观字段，确保内容完整。
 
@@ -1532,6 +1453,7 @@ class AutoBibleGenerator:
         async for chunk in self._stream_single_field(
             premise, target_chapters, dim_key, field_key,
             existing_worldbuilding, existing_dim_fields,
+            chain_context=chain_context,
         ):
             parts.append(chunk)
         return "".join(parts).strip()
@@ -1544,6 +1466,8 @@ class AutoBibleGenerator:
         field_key: str,
         existing_worldbuilding: Dict[str, Any] | None = None,
         existing_dim_fields: Dict[str, str] | None = None,
+        *,
+        chain_context: str = "",
     ):
         """流式逐字段生成：逐 token yield 字段内容。
 
@@ -1558,14 +1482,20 @@ class AutoBibleGenerator:
         Yields:
             str: LLM 逐 token 输出的文本片段
         """
-        dim_def = self._DIMENSION_DEFS.get(dim_key)
-        if not dim_def:
+        field_item = next(
+            (
+                item for item in self.get_worldbuilding_field_plan()
+                if item.get("dimension") == dim_key and item.get("field") == field_key
+            ),
+            None,
+        )
+        if not field_item:
             logger.warning("Unknown dimension key: %s", dim_key)
             return
 
-        dim_label = dim_def["label"]
-        field_desc = dim_def["fields"].get(field_key, "")
-        field_label_cn = self._FIELD_LABELS.get(field_key, field_key)
+        dim_label = field_item.get("dimension_label", dim_key)
+        field_desc = field_item.get("field_desc", "")
+        field_label_cn = field_item.get("field_label", field_key)
 
         # 构建已生成维度的上下文
         context_block = ""
@@ -1576,15 +1506,13 @@ class AutoBibleGenerator:
                     items = ", ".join(f"{fk}: {fv}" for fk, fv in dv.items() if fv)
                     if items:
                         context_parts.append(f"- {dk}: {items}")
-            if context_parts:
-                context_block = f"\n\n已生成的其他维度（请保持一致性）：\n" + "\n".join(context_parts)
+            context_block = "\n".join(context_parts)
 
         # 构建同维度已生成字段的上下文
         sibling_block = ""
         if existing_dim_fields:
             sibling_parts = [f"  - {fk}: {fv}" for fk, fv in existing_dim_fields.items() if fv]
-            if sibling_parts:
-                sibling_block = f"\n\n同维度「{dim_label}」已生成的字段（请保持内容不重复、风格一致）：\n" + "\n".join(sibling_parts)
+            sibling_block = "\n".join(sibling_parts)
 
         from infrastructure.ai.prompt_utils import render_prompt
 
@@ -1598,9 +1526,8 @@ class AutoBibleGenerator:
                 "field_desc": field_desc,
                 "context_block": context_block,
                 "sibling_block": sibling_block,
+                "chain_context": chain_context,
             },
-            fallback_system=_FALLBACK_BIBLE_FIELD_SYSTEM,
-            fallback_user=_FALLBACK_BIBLE_FIELD_USER,
         )
 
         try:
@@ -1612,41 +1539,15 @@ class AutoBibleGenerator:
             logger.error("Failed to stream field %s.%s: %s", dim_key, field_key, e)
             return
 
-    # 字段中文标签映射
-    _FIELD_LABELS = {
-        "power_system": "力量体系",
-        "physics_rules": "物理规律",
-        "magic_tech": "魔法/科技",
-        "cost_and_limitation": "代价与限制",
-        "resource_scarcity": "稀缺资源",
-        "terrain": "地形",
-        "climate": "气候",
-        "resources": "资源",
-        "ecology": "生态",
-        "forbidden_zones": "禁区",
-        "urban_core": "核心城市",
-        "hidden_realms": "秘境",
-        "politics": "政治体制",
-        "economy": "经济模式",
-        "class_system": "阶级系统",
-        "power_structure": "权力结构",
-        "oppression_mechanism": "压迫机制",
-        "class_division": "阶层划分",
-        "history": "历史事件",
-        "religion": "宗教信仰",
-        "taboos": "文化禁忌",
-        "worship": "崇拜与祭祀",
-        "oaths_and_curses": "誓言与诅咒",
-        "food_clothing": "衣食住行",
-        "language_slang": "俚语与口音",
-        "entertainment": "娱乐方式",
-        "survival_tactics": "生存策略",
-        "market_reality": "市场状况",
-        "food_and_drink": "饮食文化",
-        "slang_and_profanity": "粗话与黑话",
-    }
-
-    async def _generate_characters(self, premise: str, target_chapters: int, worldbuilding: Dict[str, Any]) -> Dict[str, Any]:
+    async def _generate_characters(
+        self,
+        premise: str,
+        target_chapters: int,
+        worldbuilding: Dict[str, Any],
+        *,
+        style_guide: str = "",
+        chain_context: str = "",
+    ) -> Dict[str, Any]:
         """基于世界观生成人物"""
         wb_summary = self._summarize_worldbuilding(worldbuilding)
 
@@ -1658,11 +1559,10 @@ class AutoBibleGenerator:
                 "premise": premise,
                 "target_chapters": str(target_chapters),
                 "worldbuilding": wb_summary,
-                "style_guide": "",
+                "style_guide": style_guide,
                 "existing_characters": "",
+                "chain_context": chain_context,
             },
-            fallback_system=_FALLBACK_BIBLE_CHARACTERS_SYSTEM,
-            fallback_user=_FALLBACK_BIBLE_CHARACTERS_USER,
         )
 
         return await self._call_llm_and_parse_with_retry(rendered["system"], rendered["user"])
@@ -1674,6 +1574,9 @@ class AutoBibleGenerator:
         premise: str,
         target_chapters: int,
         worldbuilding: Dict[str, Any],
+        *,
+        style_guide: str = "",
+        chain_context: str = "",
     ) -> AsyncIterator[Dict[str, Any]]:
         """流式生成人物：LLM 逐 token 输出，增量解析 JSON 数组，
         每解析完一个角色对象立即 yield 给调用方。
@@ -1693,11 +1596,10 @@ class AutoBibleGenerator:
                 "premise": premise,
                 "target_chapters": str(target_chapters),
                 "worldbuilding": wb_summary,
-                "style_guide": "",
+                "style_guide": style_guide,
                 "existing_characters": "",
+                "chain_context": chain_context,
             },
-            fallback_system=_FALLBACK_BIBLE_CHARACTERS_SYSTEM,
-            fallback_user=_FALLBACK_BIBLE_CHARACTERS_USER,
         )
         prompt = Prompt(system=rendered["system"], user=rendered["user"])
         config = GenerationConfig(max_tokens=4096, temperature=0.7)
@@ -1733,10 +1635,19 @@ class AutoBibleGenerator:
 
         yield {"type": "done", "count": char_index}
 
-    async def _generate_locations(self, premise: str, target_chapters: int, worldbuilding: Dict[str, Any], characters: list) -> Dict[str, Any]:
+    async def _generate_locations(
+        self,
+        premise: str,
+        target_chapters: int,
+        worldbuilding: Dict[str, Any],
+        characters: list,
+        *,
+        style_guide: str = "",
+        chain_context: str = "",
+    ) -> Dict[str, Any]:
         """基于世界观和人物生成地点"""
         wb_summary = self._summarize_worldbuilding(worldbuilding)
-        char_summary = "\n".join([f"- {c['name']}: {c['description'][:50]}..." for c in characters])
+        char_summary = self._summarize_characters(characters)
 
         from infrastructure.ai.prompt_utils import render_prompt
 
@@ -1748,9 +1659,9 @@ class AutoBibleGenerator:
                 "worldbuilding": wb_summary,
                 "existing_locations": "",
                 "characters": char_summary,
+                "style_guide": style_guide,
+                "chain_context": chain_context,
             },
-            fallback_system=_FALLBACK_BIBLE_LOCATIONS_SYSTEM,
-            fallback_user=_FALLBACK_BIBLE_LOCATIONS_USER,
         )
 
         return await self._call_llm_and_parse_with_retry(rendered["system"], rendered["user"])
@@ -1763,6 +1674,9 @@ class AutoBibleGenerator:
         target_chapters: int,
         worldbuilding: Dict[str, Any],
         characters: list,
+        *,
+        style_guide: str = "",
+        chain_context: str = "",
     ) -> AsyncIterator[Dict[str, Any]]:
         """流式生成地点：LLM 逐 token 输出，增量解析 JSON 数组，
         每解析完一个地点对象立即 yield 给调用方。
@@ -1770,7 +1684,7 @@ class AutoBibleGenerator:
         Yields: 同 _stream_generate_characters，type 为 location
         """
         wb_summary = self._summarize_worldbuilding(worldbuilding)
-        char_summary = "\n".join([f"- {c['name']}: {c.get('description', '')[:50]}..." for c in characters])
+        char_summary = self._summarize_characters(characters)
 
         from infrastructure.ai.prompt_utils import render_prompt
 
@@ -1782,9 +1696,9 @@ class AutoBibleGenerator:
                 "worldbuilding": wb_summary,
                 "existing_locations": "",
                 "characters": char_summary,
+                "style_guide": style_guide,
+                "chain_context": chain_context,
             },
-            fallback_system=_FALLBACK_BIBLE_LOCATIONS_SYSTEM,
-            fallback_user=_FALLBACK_BIBLE_LOCATIONS_USER,
         )
         prompt = Prompt(system=rendered["system"], user=rendered["user"])
         config = GenerationConfig(max_tokens=4096, temperature=0.7)
@@ -1827,6 +1741,24 @@ class AutoBibleGenerator:
             if isinstance(value, dict):
                 items = ", ".join([f"{k}: {v}" for k, v in value.items() if v])
                 parts.append(f"{key}: {items}")
+        return "\n".join(parts)
+
+    def _summarize_characters(self, characters: list) -> str:
+        """Summarize character dicts or DTOs for downstream prompt context."""
+        if not characters:
+            return "无"
+        parts: list[str] = []
+        for item in characters[:12]:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "未命名")
+                role = str(item.get("role") or "")
+                desc = str(item.get("description") or item.get("public_profile") or "")
+            else:
+                name = str(getattr(item, "name", "未命名"))
+                role = str(getattr(item, "role", ""))
+                desc = str(getattr(item, "description", ""))
+            label = f"{name}（{role}）" if role else name
+            parts.append(f"- {label}: {desc[:120]}")
         return "\n".join(parts)
 
     async def _call_llm_and_parse(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
@@ -1879,7 +1811,7 @@ class AutoBibleGenerator:
                     return await self._call_llm_and_parse(system_prompt, user_prompt)
                 else:
                     # 重试时加强调prompt
-                    retry_reminder = "\n\n【重要提醒】上次JSON解析失败，请严格遵守JSON输出规则！只输出纯JSON，不要任何其他文字！"
+                    retry_reminder = "\n\n" + render_prompt_text(LLM_JSON_RETRY_REMINDER, {})
                     logger.warning("JSON解析重试 %d/%d，添加强调提示", attempt, attempts)
                     return await self._call_llm_and_parse(
                         system_prompt + retry_reminder,

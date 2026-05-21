@@ -2,9 +2,7 @@
 import logging
 from typing import Dict, Any
 from domain.ai.services.llm_service import LLMService, GenerationConfig
-from domain.ai.value_objects.prompt import Prompt
 from application.ai.knowledge_llm_contract import (
-    build_initial_knowledge_system_prompt,
     parse_initial_knowledge_llm_response,
     to_knowledge_service_update_dict,
 )
@@ -89,35 +87,19 @@ class AutoKnowledgeGenerator:
     ) -> Dict[str, Any]:
         """使用 LLM 生成 Knowledge 数据（CPMS 统一入口）"""
 
-        context_parts = []
-        if profile_lock.strip():
-            context_parts.append(f"**故事内核锁：**\n{profile_lock}")
-        if bible_summary.strip():
-            context_parts.append(f"**小说设定摘要：**\n{bible_summary}")
-        context_section = "\n\n" + "\n\n".join(context_parts) if context_parts else ""
-
         # CPMS render
         from infrastructure.ai.prompt_keys import KNOWLEDGE_INITIAL
-        from infrastructure.ai.prompt_registry import get_prompt_registry
+        from infrastructure.ai.prompt_utils import render_prompt
 
-        registry = get_prompt_registry()
         variables = {
             "title": title,
             "bible_summary": bible_summary or "",
+            "settings": bible_summary or "",
             "profile_lock": profile_lock or "",
         }
-        prompt = registry.render_to_prompt(KNOWLEDGE_INITIAL, variables)
-
-        if not prompt:
-            # 降级：使用契约中的系统提示词
-            system_prompt = build_initial_knowledge_system_prompt()
-            user_prompt = f"小说标题：《{title}》{context_section}"
-            prompt = Prompt(system=system_prompt, user=user_prompt)
-        elif profile_lock and "故事内核锁" not in (prompt.system + prompt.user):
-            prompt = Prompt(
-                system=prompt.system,
-                user=(prompt.user or "").rstrip() + "\n\n" + profile_lock,
-            )
+        rendered = render_prompt(KNOWLEDGE_INITIAL, variables)
+        from domain.ai.value_objects.prompt import Prompt
+        prompt = Prompt(system=rendered["system"], user=rendered["user"])
 
         config = GenerationConfig(max_tokens=2048, temperature=0.4)
 

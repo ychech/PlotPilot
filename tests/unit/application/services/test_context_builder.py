@@ -163,11 +163,11 @@ class TestContextBuilder:
         chapter1 = Mock()
         chapter1.number = 1
         chapter1.title = "Chapter 1"
-        chapter1.content = "Content of chapter 1"
+        chapter1.content = "林渊完成复健。赵镜仍在监控。"
         chapter2 = Mock()
         chapter2.number = 2
         chapter2.title = "Chapter 2"
-        chapter2.content = "Content of chapter 2"
+        chapter2.content = "林渊发现海水异常。最终确认自己被锁定。倒计时仍在继续。"
         chapter_repo.list_by_novel.return_value = [chapter1, chapter2]
 
         builder = _make_builder(chapter_repo=chapter_repo)
@@ -177,7 +177,9 @@ class TestContextBuilder:
             outline="Test outline",
             max_tokens=35000,
         )
-        assert "Chapter 1" in context or "Chapter 2" in context
+        assert "最近章节承接简报" in context
+        assert "已发生结果" in context
+        assert "确认自己被锁定" in context
 
     @pytest.mark.skip(reason="V9 allocator 未注入 Storyline 实体；主线由图谱/记忆模块另行承载")
     def test_build_context_includes_storylines(self):

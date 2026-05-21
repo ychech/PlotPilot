@@ -16,5 +16,13 @@ variables:
   desc: Target chapter count
   type: integer
   required: true
+- name: worldbuilding_summary
+  desc: Upstream worldbuilding summary generated before style convention
+  type: string
+  default: ''
+- name: chain_context
+  desc: Chained generation context and consistency checks
+  type: string
+  default: ''
 id: bible-style-convention
 sort_order: 12

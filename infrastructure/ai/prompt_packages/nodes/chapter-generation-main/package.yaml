@@ -1,7 +1,7 @@
 name: 主工作流章节生成 v8（章节闭环与人称锁）
 category: generation
 source: application/workflows/auto_novel_generation_workflow.py::_build_prompt()
-description: 'v8: 在v7 Anti-AI 协议基础上，强化默认第三人称限制视角与章节任务闭环。正文必须完成本章阶段性结果，不能停在任何新物件、新声音、新人物、新信息、新威胁、新提示或新异象刚出现的位置。'
+description: 'v8: 在v7 Anti-AI 协议基础上，强化默认第三人称限制视角与章节任务闭环。正文形成本章阶段性结果，结尾落在完整事件或完整动作之后。'
 builtin: true
 tags:
 - 核心
@@ -14,6 +14,16 @@ tags:
 - 章节闭环
 - 第三人称限制视角
 variables:
+- name: style_guide
+  desc: 文风公约全文。从 Bible.style_notes 中提取的"文风公约"类别内容，指导本章的叙事视角、语调、节奏、氛围等。
+  type: string
+  required: false
+  default: ''
+  source: AutoNovelGenerationWorkflow._load_style_guide
+  priority: critical
+  prompt_role: style_constraints
+  empty_behavior: 可为空；没有文风公约时使用默认第三人称限制视角。
+  editor_note: 这是控制全文叙述腔调的核心变量，优先级高于其他风格辅助信息。
 - name: context
   desc: 章节主上下文聚合块。由 ContextBuilder.build_structured_context 生成，并由 assemble_chapter_bundle_context_text 拼成 Layer1 + RECENT CHAPTERS + VECTOR RECALL。它是模型写正文时的主要事实来源，不是给模型复述的材料。
   type: context_bundle
@@ -28,7 +38,7 @@ variables:
   priority: high
   prompt_role: background_constraints
   empty_behavior: 不建议为空；为空时生成质量会明显下降，应检查上下文构建和数据库内容。
-  editor_note: 模板中应要求模型内化并对齐 context，不要要求它解释或复述 context。
+  editor_note: 模板中要求模型内化并对齐 context，正文自然承接 context。
 - name: character_canon_contract
   desc: Bible 角色正典锁。由生成工作流从 Bible.characters 提炼，集中约束姓名、身份、职业/能力、关系、心理状态、声线/口癖、习惯动作、核心信念、禁忌、持续伤痕，以及隐藏信息 reveal_chapter。用于防止角色混写、旧名占位、新增具名角色、提前揭露隐藏身份。
   type: string
@@ -46,7 +56,7 @@ variables:
   priority: same_as_bible
   prompt_role: hard_character_constraints
   empty_behavior: 可为空；没有 Bible 或角色资产时跳过。
-  editor_note: 这是角色一致性的硬约束变量。模板中不要把它改成“参考资料”，否则角色漂移会重新变多。
+  editor_note: 这是角色一致性的硬约束变量。模板中保持它的正典优先级。
 - name: outline
   desc: 本章大纲。来自用户输入、托管自动大纲或重写弹窗。若与 Bible/FACT_LOCK 冲突，正文应保留核心事件意图，但以正典设定为准。
   type: string
@@ -56,7 +66,7 @@ variables:
   prompt_role: chapter_intent
   empty_behavior: API 层拒绝空大纲。
 - name: planning_section
-  desc: 故事线/里程碑、情节张力、文风摘要组合块。由工作流运行时拼接，主要用于控制本章在长篇结构中的位置和节奏。
+  desc: 故事线/里程碑、情节张力、文风摘要组合块。由工作流运行时拼接，主要用于控制本章在长篇结构中的位置、节奏和基础文风。
   type: string
   required: false
   default: ''
@@ -132,6 +142,46 @@ variables:
   source: ContextBuilder.build_beat_prompt + workflow beat extras
   priority: high
   prompt_role: local_scene_instruction
+- name: theme_persona
+  desc: 题材/主题集成器生成的作者身份或叙事人格。可为空；为空时不影响主生成。
+  type: string
+  required: false
+  default: ''
+  source: ThemeIntegrator.build_system_persona
+  priority: medium
+  prompt_role: style_constraints
+- name: theme_rules
+  desc: 题材专项写作规则。可为空；用于补充具体赛道的叙述语感、战斗/悬疑/情感写法等。
+  type: string
+  required: false
+  default: ''
+  source: ThemeIntegrator.build_writing_rules
+  priority: medium
+  prompt_role: style_constraints
+- name: format_rules
+  desc: 题材格式规则。可为空；用于补充叙述人称、排版和题材呈现格式。
+  type: string
+  required: false
+  default: ''
+  source: ThemeIntegrator.build_format_rules
+  priority: medium
+  prompt_role: format_constraints
+- name: shuangwen_directive
+  desc: 爽文/商业节奏片段。由 chapter-shuangwen-directive 节点和 extras 动态渲染，可为空。
+  type: string
+  required: false
+  default: ''
+  source: AutoNovelGenerationWorkflow._build_shuangwen_directive
+  priority: medium
+  prompt_role: narrative_control
+- name: prose_discipline
+  desc: 行文戒律块，包含反八股、控水分、对白厚度、段落聚合等正文质量约束。
+  type: string
+  required: false
+  default: ''
+  source: application/workflows/prose_discipline.py::build_prose_discipline_block
+  priority: high
+  prompt_role: prose_quality
 - name: fact_lock
   desc: V6 记忆引擎：FACT_LOCK + COMPLETED_BEATS + REVEALED_CLUES 组合文本块（由 MemoryEngine
     动态生成）
@@ -142,6 +192,6 @@ variables:
   priority: critical
   prompt_role: hard_guardrail
   empty_behavior: 可为空；MemoryEngine 未启用或无历史资产时跳过。
-  editor_note: FACT_LOCK 的优先级高于大纲措辞。不要在模板中削弱它。
+  editor_note: FACT_LOCK 的优先级高于大纲措辞。模板中保持它的优先级。
 id: chapter-generation-main
 sort_order: 0

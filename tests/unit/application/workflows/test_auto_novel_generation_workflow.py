@@ -6,6 +6,7 @@ from application.workflows.auto_novel_generation_workflow import (
     CHAPTER_CONTEXT_LAYER2_HEADER,
     CHAPTER_CONTEXT_LAYER3_HEADER,
     assemble_chapter_bundle_context_text,
+    estimate_chapter_context_tokens,
 )
 from application.engine.dtos.generation_result import GenerationResult
 from application.engine.dtos.scene_director_dto import SceneDirectorAnalysis
@@ -106,14 +107,16 @@ def workflow(
 
 def test_assemble_chapter_bundle_context_text_uses_t2_t3_headers():
     payload = {
-        "layer1_text": "L1",
-        "layer2_text": "L2",
-        "layer3_text": "L3",
+        "layer1_text": "角色锚点：林渊不能改名",
+        "layer2_text": "- 已发生结果：林渊确认被监控",
+        "layer3_text": "[第 3 章] 待回收伏笔仍未揭露",
     }
     s = assemble_chapter_bundle_context_text(payload)
     assert f"=== {CHAPTER_CONTEXT_LAYER2_HEADER} ===" in s
     assert f"=== {CHAPTER_CONTEXT_LAYER3_HEADER} ===" in s
-    assert "L1" in s and "L2" in s and "L3" in s
+    assert "林渊不能改名" in s
+    assert "林渊确认被监控" in s
+    assert "待回收伏笔仍未揭露" in s
 
 
 class TestGenerateChapter:
@@ -132,8 +135,8 @@ class TestGenerateChapter:
         # 验证返回结果
         assert isinstance(result, GenerationResult)
         assert result.content == "Generated chapter content"
-        assert result.token_count == 9250
-        assert "Layer 1 context" in result.context_used
+        assert result.token_count == estimate_chapter_context_tokens(result.context_used)
+        assert f"=== {CHAPTER_CONTEXT_LAYER2_HEADER} ===" in result.context_used
         assert f"=== {CHAPTER_CONTEXT_LAYER2_HEADER} ===" in result.context_used
         assert f"=== {CHAPTER_CONTEXT_LAYER3_HEADER} ===" in result.context_used
         assert isinstance(result.consistency_report, ConsistencyReport)
@@ -143,7 +146,7 @@ class TestGenerateChapter:
             novel_id="novel-1",
             chapter_number=1,
             outline="Chapter 1 outline",
-            max_tokens=35000,
+            max_tokens=5000,
             scene_director=None
         )
         # 验证 LLM 被调用：至少一次用于生成章节，可能还有一次用于状态提取
@@ -178,7 +181,7 @@ class TestGenerateChapter:
             novel_id="novel-1",
             chapter_number=1,
             outline="Chapter 1 outline",
-            max_tokens=35000,
+            max_tokens=5000,
             scene_director=scene_director
         )
 
@@ -251,7 +254,8 @@ class TestGenerateChapterStream:
         assert "chunk" in types
         assert events[-1]["type"] == "done"
         assert events[-1]["content"] == "Generated chapter content"
-        assert events[-1]["token_count"] == 9250
+        expected_context = assemble_chapter_bundle_context_text(workflow.context_builder.build_structured_context.return_value)
+        assert events[-1]["token_count"] == estimate_chapter_context_tokens(expected_context)
 
     def test_chapter_generation_config_prioritizes_output_budget(self, workflow):
         cfg = workflow._chapter_generation_config(10_000)
@@ -326,7 +330,7 @@ class TestBuildPrompt:
 
         assert "Full context" in prompt.system
         assert "Chapter outline" in prompt.user
-        assert "行文戒律" in prompt.system
+        assert "行文目标" in prompt.system
 
     def test_build_prompt_includes_storyline_and_tension(self, workflow):
         """故事线与情节张力应进入 system，供模型遵守"""
@@ -773,6 +777,69 @@ class TestQualityGate:
         assert "上下文对齐协议" in prompt.system
         assert "FACT_LOCK > Bible 正典" in prompt.system
 
+    def test_assembled_context_is_deduped_and_focused(self):
+        noisy_line = "重复事实：林渊左臂有追踪光环"
+        payload = {
+            "layer1_text": (
+                "=== 🔒绝对事实边界(FACT_LOCK) ===\n"
+                "角色锚点：林渊不能改名\n"
+                f"{noisy_line}\n{noisy_line}\n"
+                + "设定说明" * 4000
+            ),
+            "layer2_text": (
+                "【章末节选，供本章开头承接】\n"
+                "倒计时继续跳动，赵镜锁定了林渊的位置。\n"
+                + "上一章正文" * 3000
+            ),
+            "layer3_text": (
+                "【相关上下文（向量召回）】\n"
+                "第3章：待回收伏笔仍未揭露。\n"
+                + "远期片段" * 2000
+            ),
+            "token_usage": {"total": 30000, "layer1": 10000, "layer2": 10000, "layer3": 10000},
+        }
+
+        context = assemble_chapter_bundle_context_text(payload)
+
+        assert "=== CONTEXT FOCUS ===" in context
+        assert "角色锚点：林渊不能改名" in context
+        assert "章末节选" in context
+        assert context.count(noisy_line) <= 2
+        assert f"{noisy_line}\n{noisy_line}" not in context
+        assert "=== RECENT CHAPTERS ===" in context
+        assert "=== VECTOR RECALL ===" in context
+        assert "上一章正文" * 20 not in context
+        assert "远期片段" * 20 not in context
+        assert len(context) < 9000
+
+    def test_assembled_context_extracts_brief_instead_of_raw_passages(self):
+        payload = {
+            "layer1_text": "=== 角色锚点 ===\n角色锚点：林渊不能改名\n无关设定" * 500,
+            "layer2_text": (
+                "【最近章节承接简报】\n"
+                "第 1 章：灰瞳苏醒\n"
+                "- 用途：上一章直接承接\n"
+                "- 已发生结果：林渊确认自己被赵镜监控\n"
+                "- 未解决压力：倒计时继续跳动，赵镜锁定了林渊的位置\n"
+                "- 可接续画面：病房灯光发冷\n"
+                + "正文原文" * 1000
+            ),
+            "layer3_text": (
+                "【远期记忆提要（向量召回已简化）】\n"
+                "[第 3 章] 待回收伏笔仍未揭露；赵镜的追踪权限来自协会\n"
+                + "召回原文" * 1000
+            ),
+            "token_usage": {"total": 20000},
+        }
+
+        context = assemble_chapter_bundle_context_text(payload)
+
+        assert "林渊确认自己被赵镜监控" in context
+        assert "倒计时继续跳动" in context
+        assert "待回收伏笔仍未揭露" in context
+        assert "正文原文" * 20 not in context
+        assert "召回原文" * 20 not in context
+
     def test_context_alignment_protocol_has_fallback_priority(self, workflow):
         protocol = workflow._build_context_alignment_protocol("context", "outline")
 
@@ -785,7 +852,7 @@ class TestQualityGate:
         combined = prompt.system + "\n" + prompt.user
         assert "完整章节收束" in combined or "结尾要有落点" in combined
         assert "说到一半停了" not in combined
-        assert "半截对白" in combined
+        assert "完整对白" in combined
         assert "亲历者" not in combined
         assert "第三人称限制视角" in combined
 
@@ -825,6 +892,26 @@ class TestQualityGate:
         assert "【题材专项规则】力量体系要有压迫感" in prompt.system
         assert "{behavior_protocol}" not in prompt.system
 
+    def test_main_prompt_uses_user_template_and_has_no_unknown_placeholders(self, workflow):
+        prompt = workflow._build_prompt(
+            "CTX",
+            "林渊进入训练场，发现赵镜留下的追踪标记。",
+            style_summary="文风冷峻克制，动作密度高。",
+            chapter_target_words=2500,
+        )
+
+        combined = prompt.system + "\n" + prompt.user
+        assert "【本章大纲 outline】" in prompt.user
+        assert "【当前节拍 beat_section】" in prompt.user
+        assert "非分节拍生成" in prompt.user
+        assert "林渊进入训练场" in prompt.user
+        assert "【风格约束】" in prompt.system
+        assert "文风冷峻克制" in prompt.system
+        assert "{style_convention}" not in combined
+        assert "{chapter_outline}" not in combined
+        assert "{outline}" not in combined
+        assert "{beat_section}" not in combined
+
 
 class TestCharacterCanonGuard:
     """测试角色正典锁与角色漂移门禁"""
@@ -861,7 +948,7 @@ class TestCharacterCanonGuard:
         assert "角色正典锁" in prompt.system
         assert "林渊" in prompt.system
         assert "第20章" in prompt.system
-        assert "不得公开揭露" in prompt.system
+        assert "角色公开信息按剧情时点推进" in prompt.system
 
     def test_character_canon_drift_flags_new_named_character(self, workflow):
         repo = Mock()

@@ -10,11 +10,6 @@ from domain.shared.time_utils import utcnow_iso
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM = (
-    "你是一个叙事分析引擎。根据小说章节正文，识别道具相关事件。"
-    "只输出 JSON 数组，不要 markdown 围栏，不要解释。"
-)
-
 _SCHEMA = """输出格式（JSON 数组）：
 [
   {
@@ -44,7 +39,7 @@ class LlmExtractor:
         """Get system prompt via CPMS."""
         from infrastructure.ai.prompt_utils import get_prompt_system
         from infrastructure.ai.prompt_keys import PROP_EVENT_EXTRACTION
-        return get_prompt_system(PROP_EVENT_EXTRACTION, fallback=_SYSTEM)
+        return get_prompt_system(PROP_EVENT_EXTRACTION)
 
     async def extract(
         self,
@@ -61,27 +56,17 @@ class LlmExtractor:
             for p in active_props[:20]
         )
 
-        # CPMS render
         from infrastructure.ai.prompt_keys import PROP_EVENT_EXTRACTION
-        from infrastructure.ai.prompt_registry import get_prompt_registry
+        from infrastructure.ai.prompt_utils import render_prompt
 
-        registry = get_prompt_registry()
         variables = {
             "props_summary": props_summary,
             "chapter_excerpt": content[:1500],
             "output_schema": _SCHEMA,
         }
-        prompt = registry.render_to_prompt(PROP_EVENT_EXTRACTION, variables)
-
-        # 降级
-        if not prompt:
-            from domain.ai.value_objects.prompt import Prompt
-            user_msg = (
-                f"当前 ACTIVE 道具列表：\n{props_summary}\n\n"
-                f"章节正文（节选，前 1500 字）：\n{content[:1500]}\n\n"
-                f"{_SCHEMA}"
-            )
-            prompt = Prompt(system=self._get_system_prompt(), user=user_msg)
+        rendered = render_prompt(PROP_EVENT_EXTRACTION, variables)
+        from domain.ai.value_objects.prompt import Prompt
+        prompt = Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
 
         try:
             from domain.ai.services.llm_service import GenerationConfig

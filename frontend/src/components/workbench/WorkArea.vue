@@ -959,6 +959,8 @@ function sseTagType(
     规划: 'warning',
     节拍: 'success',
     正文: 'primary',
+    后处理: 'info',
+    警告: 'warning',
   }
   return map[tag] ?? 'default'
 }
@@ -1642,6 +1644,36 @@ function streamPhaseToLabel(phase: string): string {
   return map[phase] ?? phase
 }
 
+function postStepProgress(step: string): number {
+  const map: Record<string, number> = {
+    style_scan: 93,
+    state_extract: 94,
+    state_extract_timeout: 95,
+    consistency: 95,
+    conflict_scan: 96,
+    quality_gate: 97,
+    memory_commit: 98,
+    memory_commit_timeout: 99,
+    beats_review: 99,
+  }
+  return map[step] ?? 93
+}
+
+function postStepLabel(step: string, message: string): string {
+  const map: Record<string, string> = {
+    style_scan: '后处理 · 扫描俗套句式…',
+    state_extract: '后处理 · 提取章节状态…',
+    state_extract_timeout: '后处理 · 状态提取超时，已降级…',
+    consistency: '后处理 · 检查一致性…',
+    conflict_scan: '后处理 · 生成冲突批注…',
+    quality_gate: '后处理 · 执行质量门禁…',
+    memory_commit: '后处理 · 回写状态与记忆…',
+    memory_commit_timeout: '后处理 · 记忆回写超时，已跳过…',
+    beats_review: '后处理 · 整理章节节拍…',
+  }
+  return map[step] ?? (message ? `后处理 · ${message}…` : '后处理…')
+}
+
 function httpStatusFromError(e: unknown): number | undefined {
   if (e && typeof e === 'object' && 'response' in e) {
     const r = (e as { response?: { status?: number } }).response
@@ -1819,6 +1851,16 @@ const handleStartGenerate = async () => {
           if (stats) {
             streamStats.value = stats
           }
+        },
+        onEvent: (ev) => {
+          if (ev.type !== 'post_step') return
+          generateStreamPhase.value = 'post'
+          streamPhaseLabel.value = postStepLabel(ev.step, ev.message)
+          streamProgressPct.value = Math.max(streamProgressPct.value, postStepProgress(ev.step))
+          pushGenerateSseLog(
+            ev.level === 'warning' ? '警告' : '后处理',
+            ev.message || ev.step,
+          )
         },
         onDone: (result) => {
           pushGenerateSseLog('SSE', 'done · 生成完成')

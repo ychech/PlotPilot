@@ -233,12 +233,12 @@ class WriterNode(BaseNode):
                 config = GenerationConfig()
                 if beats and len(beats) > 0:
                     config = GenerationConfig(
-                        max_tokens=2000,
+                        max_tokens=12000,
                         temperature=0.85,
                     )
                 else:
                     config = GenerationConfig(
-                        max_tokens=4000,
+                        max_tokens=18000,
                         temperature=0.80,
                     )
 

@@ -1,6 +1,6 @@
-version: 5.6.0-chapter-prose-closure
+version: 5.10.3-main-prompt-trim
 name: PlotPilot 内置
 description: CPMS v5 统一提示词库 — 全节点中文提示词、统一注册表、消除硬编码
 author: PlotPilot Team
 engine: jinja2
-changelog: 'v5.6: 强化正文生成默认第三人称限制视角与章节任务闭环，避免第一人称误用和半章式断尾；v5.5: 抽离 planning-macro-precise / planning-macro-repair，并升级 planning-act 为真实幕级章节规划契约；v5.4: 将 planning-quick-macro 宏观规划主提示词从服务硬编码抽离到 node；v5.3: 强化 knowledge-initial 提示词严格性，禁止推测/多余字段；v5.2: 更新 bible-style-convention 至详细中文版本'
+changelog: 'v5.10.3: 将 length_rule 从编号项改为独立篇幅控制块，降低模板感；v5.10.2: 精简 chapter-generation-main，移除未注入占位符，显式对齐 outline/beat_section 与文风变量；v5.10.1: 修正去 AI 腔规则措辞，避免模型误读短句/破折号约束；v5.10: 强化前三章开篇质量、类型承诺兑现与对白厚度约束；v5.9: 新增章节生成 fragment 节点与 planning-macro-volume / planning-next-act-dual-track / chapter-outline-suggest，进一步移除 workflow/规划服务中的混杂提示词；v5.8: 移除 Bible/Knowledge 生成链路中的 Python 硬编码 LLM 提示词，新增 bible-chain-context、novel-profile-lock、llm-json-retry-reminder 节点；v5.7: Bible 生成改为故事创意->世界观->人物->地点的链式上下文，并为相关节点补充 chain_context；v5.6: 强化正文生成默认第三人称限制视角与章节任务闭环，避免第一人称误用和半章式断尾；v5.5: 抽离 planning-macro-precise / planning-macro-repair，并升级 planning-act 为真实幕级章节规划契约；v5.4: 将 planning-quick-macro 宏观规划主提示词从服务硬编码抽离到 node；v5.3: 强化 knowledge-initial 提示词严格性，禁止推测/多余字段；v5.2: 更新 bible-style-convention 至详细中文版本'

@@ -1,0 +1,17 @@
+name: 章节角色正典锁
+category: generation
+source: application/workflows/auto_novel_generation_workflow.py::_build_character_canon_contract()
+description: 将 Bible 角色资产注入章节正文生成，约束姓名、身份、关系、心理状态、声线、习惯动作、隐藏信息揭露时机。
+builtin: true
+tags:
+- 核心
+- 角色正典
+- 章节生成
+output_format: text
+variables:
+- name: character_canon
+  desc: 由工作流从 Bible.characters 汇总出的角色事实列表。
+  type: string
+  required: true
+id: chapter-character-canon-contract
+sort_order: 3

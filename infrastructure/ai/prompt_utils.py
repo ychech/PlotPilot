@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,9 @@ def get_prompt_system(node_key: str, fallback: str = "") -> str:
     except Exception as exc:
         logger.warning("━━━ Prompt[%s] ━━━ (system) ERROR (%s), fallback %d chars", node_key, exc, len(fallback))
 
+    package_rendered = _render_from_package_node(node_key, {})
+    if package_rendered and package_rendered.get("system"):
+        return package_rendered["system"]
     return fallback
 
 
@@ -68,6 +72,9 @@ def get_prompt_user_template(node_key: str, fallback: str = "") -> str:
     except Exception as exc:
         logger.debug("PromptRegistry unavailable (node_key=%s): %s", node_key, exc)
 
+    package_rendered = _render_from_package_node(node_key, {})
+    if package_rendered and package_rendered.get("user"):
+        return package_rendered["user"]
     return fallback
 
 
@@ -93,11 +100,42 @@ def render_prompt(
     except Exception as exc:
         logger.debug("PromptRegistry render failed (node_key=%s): %s", node_key, exc)
 
+    package_rendered = _render_from_package_node(node_key, variables or {})
+    if package_rendered and (package_rendered["system"] or package_rendered["user"]):
+        return package_rendered
+
     # Fallback: simple format_map rendering
     var_map = variables or {}
     system = _simple_render(fallback_system, var_map)
     user = _simple_render(fallback_user, var_map)
     return {"system": system, "user": user}
+
+
+def render_prompt_text(node_key: str, variables: Optional[Dict[str, Any]] = None) -> str:
+    """Render a text-only prompt node and return system+user content."""
+    rendered = render_prompt(node_key, variables)
+    if not rendered:
+        return ""
+    return "\n\n".join(
+        part.strip() for part in [rendered.get("system", ""), rendered.get("user", "")] if part.strip()
+    )
+
+
+def _render_from_package_node(node_key: str, variables: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Render directly from prompt_packages/nodes as a non-Python fallback."""
+    try:
+        root = Path(__file__).resolve().parent / "prompt_packages" / "nodes" / node_key
+        if not root.is_dir():
+            return None
+        system = (root / "system.md").read_text(encoding="utf-8") if (root / "system.md").is_file() else ""
+        user = (root / "user.md").read_text(encoding="utf-8") if (root / "user.md").is_file() else ""
+        return {
+            "system": _simple_render(system, variables),
+            "user": _simple_render(user, variables),
+        }
+    except Exception as exc:
+        logger.debug("Package prompt render failed (node_key=%s): %s", node_key, exc)
+        return None
 
 
 def _simple_render(template: str, variables: Dict[str, Any]) -> str:

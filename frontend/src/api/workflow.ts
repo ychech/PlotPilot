@@ -253,14 +253,40 @@ export type GenerateChapterStreamEvent =
   | { type: 'llm_chunk'; stage: string; text: string }
   | { type: 'beats_generated'; beats: StreamGeneratedBeat[] }
   | { type: 'chunk'; text: string; stats: ChunkStats }
+  | { type: 'post_step'; step: string; message: string; level?: 'info' | 'warning' | 'error' }
   | { type: 'quality_gate'; passed: boolean; reasons: string[]; repair_attempted?: boolean; repair_applied?: boolean }
   | { type: 'done'; content: string; consistency_report: ConsistencyReportDTO; token_count: number; output_tokens: number; total_tokens: number; chars: number; style_warnings?: StyleWarning[]; ghost_annotations?: unknown[] }
   | { type: 'error'; message: string }
 
-function parseSseDataLine(line: string): unknown | null {
-  if (!line.startsWith('data: ')) return null
+function takeNextSseBlock(buffer: string): { block: string; rest: string } | null {
+  const lfIdx = buffer.indexOf('\n\n')
+  const crlfIdx = buffer.indexOf('\r\n\r\n')
+  let sep = -1
+  let sepLen = 2
+  if (lfIdx !== -1 && (crlfIdx === -1 || lfIdx <= crlfIdx)) {
+    sep = lfIdx
+    sepLen = 2
+  } else if (crlfIdx !== -1) {
+    sep = crlfIdx
+    sepLen = 4
+  }
+  if (sep < 0) return null
+  return {
+    block: buffer.slice(0, sep),
+    rest: buffer.slice(sep + sepLen),
+  }
+}
+
+function parseSseEventBlock(block: string): unknown | null {
+  const dataLines: string[] = []
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith('data:')) {
+      dataLines.push(line.startsWith('data: ') ? line.slice(6) : line.slice(5).replace(/^\s/, ''))
+    }
+  }
+  if (!dataLines.length) return null
   try {
-    return JSON.parse(line.slice(6)) as unknown
+    return JSON.parse(dataLines.join('\n')) as unknown
   } catch {
     return null
   }
@@ -303,14 +329,12 @@ export async function consumeGenerateChapterStream(
   try {
     /** 排空 buf 中的完整 SSE 帧；返回是否需要结束本次 consume */
     const drainCompleteFrames = (): boolean => {
-      let sep: number
-      while ((sep = buf.indexOf('\n\n')) >= 0) {
-        const block = buf.slice(0, sep)
-        buf = buf.slice(sep + 2)
-        for (const line of block.split('\n')) {
-          const raw = parseSseDataLine(line)
-          if (!raw || typeof raw !== 'object' || raw === null) continue
-          const o = raw as Record<string, unknown>
+      let next: { block: string; rest: string } | null
+      while ((next = takeNextSseBlock(buf)) !== null) {
+        buf = next.rest
+        const raw = parseSseEventBlock(next.block)
+        if (!raw || typeof raw !== 'object' || raw === null) continue
+        const o = raw as Record<string, unknown>
           const typ = o.type as string
           if (typ === 'phase') {
             const ph = String(o.phase ?? '')
@@ -337,6 +361,17 @@ export async function consumeGenerateChapterStream(
             const ev: GenerateChapterStreamEvent = { type: 'chunk', text, stats: stats || { chars: 0, chunks: 0, estimated_tokens: 0 } }
             handlers.onEvent?.(ev)
             handlers.onChunk?.(text, stats)
+          } else if (typ === 'post_step') {
+            const levelRaw = String(o.level ?? 'info')
+            const level =
+              levelRaw === 'warning' || levelRaw === 'error' ? levelRaw : 'info'
+            const ev: GenerateChapterStreamEvent = {
+              type: 'post_step',
+              step: String(o.step ?? ''),
+              message: String(o.message ?? o.step ?? ''),
+              level,
+            }
+            handlers.onEvent?.(ev)
           } else if (typ === 'quality_gate') {
             const ev: GenerateChapterStreamEvent = {
               type: 'quality_gate',
@@ -384,7 +419,6 @@ export async function consumeGenerateChapterStream(
             handlers.onError?.(msg)
             return true
           }
-        }
       }
       return false
     }
@@ -442,20 +476,17 @@ export async function consumeHostedWriteStream(
   let buf = ''
   try {
     const drainFrames = (): boolean => {
-      let sep: number
-      while ((sep = buf.indexOf('\n\n')) >= 0) {
-        const block = buf.slice(0, sep)
-        buf = buf.slice(sep + 2)
-        for (const line of block.split('\n')) {
-          const raw = parseSseDataLine(line)
-          if (!raw || typeof raw !== 'object' || raw === null) continue
-          const o = raw as Record<string, unknown>
+      let next: { block: string; rest: string } | null
+      while ((next = takeNextSseBlock(buf)) !== null) {
+        buf = next.rest
+        const raw = parseSseEventBlock(next.block)
+        if (!raw || typeof raw !== 'object' || raw === null) continue
+        const o = raw as Record<string, unknown>
           handlers.onEvent?.(o)
           if (o.type === 'error') {
             handlers.onError?.(String(o.message ?? 'error'))
             return true
           }
-        }
       }
       return false
     }

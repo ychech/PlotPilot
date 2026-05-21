@@ -16,6 +16,7 @@
 import asyncio
 import concurrent.futures
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -175,15 +176,13 @@ class ContextBudgetAllocator:
     MAX_CHARACTER_ANCHORS_TOKENS = 1500
     MAX_GRAPH_SUBNETWORK_TOKENS = 1000
     MAX_ACT_SUMMARIES_TOKENS = 1500
-    MAX_RECENT_CHAPTERS_TOKENS = 8000   # 扩容：N-1 完整 + N-2 半量 + N-3~5 预览
-    MAX_VECTOR_RECALL_TOKENS = 5000
+    MAX_RECENT_CHAPTERS_TOKENS = 1800   # 提炼后承接简报，不再注入大段原文
+    MAX_VECTOR_RECALL_TOKENS = 900
     MAX_NARRATIVE_CONTRACT_TOKENS = 1400  # 向导五维 + 文风公约 + Bible 规则条目
 
-    # 最近章节槽位：紧邻上一章侧重章末承接；更早章节仅章首短预览以省预算
-    # V8 优化：增加章末保留量，提升章节间连贯性
-    PREV_CHAPTER_BRIDGE_HEAD_CHARS = 300   # 章首略览
-    PREV_CHAPTER_BRIDGE_TAIL_CHARS = 2000  # 章末完整保留（原 1200 → 2000）
-    OLDER_CHAPTER_HEAD_PREVIEW_CHARS = 500
+    # 最近章节槽位：先提炼成承接简报；只保留极短证据句，不再注入正文剪辑。
+    PREV_CHAPTER_BRIDGE_TAIL_CHARS = 420
+    OLDER_CHAPTER_HEAD_PREVIEW_CHARS = 140
 
     def __init__(
         self,
@@ -1384,6 +1383,14 @@ class ContextBudgetAllocator:
         
         # 返回 (角色, 是否刚登场) 的列表
         return [(char, is_recent) for char, is_recent, _ in selected]
+
+    def _get_character_id_value(self, char: Any) -> str:
+        character_id = getattr(char, "character_id", None)
+        value = getattr(character_id, "value", None)
+        if value:
+            return str(value)
+        fallback = getattr(char, "id", None)
+        return str(fallback or getattr(char, "name", "") or "")
     
     def _get_recent_characters(self, novel_id: str, chapter_number: int) -> Dict[str, Dict]:
         """从 chapter_elements 表查询最近5章的角色活动
@@ -1412,7 +1419,7 @@ class ContextBudgetAllocator:
     
     def _is_recently_appeared(self, char, recent_characters: Dict, chapter_number: int) -> bool:
         """判断角色是否刚登场（最近1-2章首次出现）"""
-        char_id = char.character_id.value
+        char_id = self._get_character_id_value(char)
         
         if char_id not in recent_characters:
             # 角色从未出现过，可能是新角色
@@ -1453,7 +1460,7 @@ class ContextBudgetAllocator:
     
     def _get_activity_score(self, char, recent_characters: Dict) -> int:
         """获取角色活动度分数"""
-        char_id = char.character_id.value
+        char_id = self._get_character_id_value(char)
         
         if char_id not in recent_characters:
             return 0
@@ -1842,22 +1849,12 @@ class ContextBudgetAllocator:
         return ""
 
     def _excerpt_immediate_previous_chapter(self, content: str) -> str:
-        """紧邻上一章正文：头短 + 章末长段，标明供本章开头承接。"""
-        raw = (content or "").strip()
-        if not raw:
-            return ""
-        head_n = self.PREV_CHAPTER_BRIDGE_HEAD_CHARS
-        tail_n = self.PREV_CHAPTER_BRIDGE_TAIL_CHARS
-        if len(raw) <= tail_n:
-            return f"【章末节选，供本章开头承接】\n{raw}"
-        if len(raw) <= head_n + tail_n:
-            return f"【章末节选，供本章开头承接】\n{raw}"
-        head = raw[:head_n]
-        tail = raw[-tail_n:]
-        return (
-            f"【章首略览】\n{head}……\n"
-            f"【章末节选，供本章开头承接】\n{tail}"
+        """兼容旧调用：返回上一章承接提要，而不是正文剪辑。"""
+        bridge = self._summarize_tail_for_bridge(
+            content or "",
+            max_chars=self.PREV_CHAPTER_BRIDGE_TAIL_CHARS,
         )
+        return f"【上一章承接提要】\n{bridge}" if bridge else ""
 
     def _get_recent_chapters(
         self,
@@ -1866,14 +1863,7 @@ class ContextBudgetAllocator:
         limit: int = 5,
         current_beat_index: int = 0,
     ) -> str:
-        """获取最近章节内容。
-
-        N-1：章首略览 + 章末完整（PREV_CHAPTER_BRIDGE_TAIL_CHARS 字）
-        N-2：章末中等片段（PREV_CHAPTER_BRIDGE_TAIL_CHARS // 2 字），帮助跨章一致性
-        N-3 及更早：仅章首短预览（OLDER_CHAPTER_HEAD_PREVIEW_CHARS 字）
-
-        断点续写时包含当前章节已生成部分，确保续写衔接。
-        """
+        """获取最近章节承接简报，不再把历史正文片段当主体上下文注入。"""
         if not self.chapter_repo:
             return ""
 
@@ -1888,33 +1878,16 @@ class ContextBudgetAllocator:
                 reverse=True
             )[:limit]
 
-            prev_num = chapter_number - 1
-            prev2_num = chapter_number - 2
-            older_cap = self.OLDER_CHAPTER_HEAD_PREVIEW_CHARS
-            lines = ["【最近章节】"]
+            lines = ["【最近章节承接简报】"]
 
             # 历史章节（按时间顺序旧 → 新）
             for chapter in reversed(recent):
-                lines.append(f"\n第 {chapter.number} 章：{chapter.title}")
-                body = (chapter.content or "").strip()
-                if not body:
-                    continue
-                if chapter.number == prev_num:
-                    # N-1：章首略览 + 章末完整
-                    excerpt = self._excerpt_immediate_previous_chapter(chapter.content or "")
-                    if excerpt:
-                        lines.append(excerpt)
-                    continue
-                if chapter.number == prev2_num:
-                    # N-2：章末中等片段（半量），帮助跨章一致性
-                    tail_n = self.PREV_CHAPTER_BRIDGE_TAIL_CHARS // 2
-                    tail = body[-tail_n:] if len(body) > tail_n else body
-                    lines.append(f"【章末节选，供跨章一致性参考】\n{tail}")
-                    continue
-                preview = body[:older_cap]
-                if len(body) > older_cap:
-                    preview = f"{preview}..."
-                lines.append(f"【章首预览】\n{preview}")
+                brief = self._summarize_recent_chapter_for_context(
+                    chapter,
+                    current_chapter_number=chapter_number,
+                )
+                if brief:
+                    lines.append(brief)
 
             # ★ 断点续写：包含当前章节已生成部分
             if current_beat_index > 0:
@@ -1924,13 +1897,14 @@ class ContextBudgetAllocator:
                 if current_chapter and current_chapter.content:
                     current_content = current_chapter.content.strip()
                     if current_content:
-                        # 取已生成内容的最后部分（最多2000字）
-                        continuation_preview = current_content[-2000:] if len(current_content) > 2000 else current_content
+                        continuation_preview = self._summarize_tail_for_bridge(
+                            current_content,
+                            max_chars=self.PREV_CHAPTER_BRIDGE_TAIL_CHARS,
+                        )
                         lines.append(f"\n【本章已生成（断点续写上下文）】")
                         lines.append(f"当前节拍索引: {current_beat_index}")
                         lines.append(f"已生成 {len(current_content)} 字")
-                        lines.append(f"---")
-                        lines.append(continuation_preview)
+                        lines.append(f"承接点：{continuation_preview}")
 
             return "\n".join(lines)
 
@@ -1938,6 +1912,78 @@ class ContextBudgetAllocator:
             logger.warning(f"获取最近章节失败: {e}")
 
         return ""
+
+    def _summarize_recent_chapter_for_context(
+        self,
+        chapter: Any,
+        *,
+        current_chapter_number: int,
+    ) -> str:
+        body = (getattr(chapter, "content", "") or "").strip()
+        title = (getattr(chapter, "title", "") or "").strip()
+        number = int(getattr(chapter, "number", 0) or 0)
+        if not body:
+            return f"\n第 {number} 章：{title}｜无正文，仅保留章节名。"
+
+        tail = self._summarize_tail_for_bridge(
+            body,
+            max_chars=self.PREV_CHAPTER_BRIDGE_TAIL_CHARS
+            if number == current_chapter_number - 1
+            else self.OLDER_CHAPTER_HEAD_PREVIEW_CHARS,
+        )
+        outcome = self._extract_outcome_sentence(body)
+        unresolved = self._extract_unresolved_pressure(body)
+        role = "上一章直接承接" if number == current_chapter_number - 1 else "远期背景参考"
+        parts = [
+            f"\n第 {number} 章：{title}",
+            f"- 用途：{role}",
+        ]
+        if outcome:
+            parts.append(f"- 已发生结果：{outcome}")
+        if unresolved:
+            parts.append(f"- 未解决压力：{unresolved}")
+        if tail:
+            parts.append(f"- 可接续画面：{tail}")
+        return "\n".join(parts)
+
+    def _summarize_tail_for_bridge(self, text: str, *, max_chars: int) -> str:
+        sentences = self._split_context_sentences(text)
+        if not sentences:
+            return ""
+        selected = sentences[-3:]
+        result = "；".join(selected)
+        if len(result) > max_chars:
+            result = result[-max_chars:].lstrip("，,。；;：: ")
+        return result
+
+    def _extract_outcome_sentence(self, text: str) -> str:
+        keywords = ("终于", "最终", "确认", "发现", "决定", "获得", "失败", "成功", "暴露", "锁定", "逃出", "击败")
+        for sentence in reversed(self._split_context_sentences(text)):
+            if any(k in sentence for k in keywords):
+                return sentence[:160]
+        sentences = self._split_context_sentences(text)
+        return sentences[-1][:160] if sentences else ""
+
+    def _extract_unresolved_pressure(self, text: str) -> str:
+        keywords = ("但", "却", "然而", "只是", "仍", "还", "不能", "没有", "必须", "威胁", "倒计时", "追踪", "监控", "伏笔")
+        for sentence in reversed(self._split_context_sentences(text)):
+            if any(k in sentence for k in keywords):
+                return sentence[:160]
+        return ""
+
+    def _split_context_sentences(self, text: str) -> List[str]:
+        cleaned = re.sub(r"\s+", " ", (text or "").strip())
+        if not cleaned:
+            return []
+        pieces = re.split(r"(?<=[。！？!?；;])", cleaned)
+        sentences = []
+        for piece in pieces:
+            sentence = piece.strip(" \t\r\n。！？!?；;")
+            if len(sentence) >= 8:
+                sentences.append(sentence)
+        if not sentences and cleaned:
+            sentences.append(cleaned[:180])
+        return sentences
     
     def _get_vector_recall(
         self,
@@ -1985,11 +2031,14 @@ class ContextBudgetAllocator:
             if not filtered:
                 return ""
             
-            lines = ["【相关上下文（向量召回）】"]
+            outline_terms = self._extract_recall_terms(outline)
+            lines = ["【远期记忆提要（向量召回已简化）】"]
             for hit in filtered[:3]:  # 最多 3 个片段
                 text = hit.get("payload", {}).get("text", "")
                 ch_num = hit.get("payload", {}).get("chapter_number", "?")
-                lines.append(f"\n[第 {ch_num} 章] {text}")
+                simplified = self._simplify_vector_hit(text, outline_terms)
+                if simplified:
+                    lines.append(f"\n[第 {ch_num} 章] {simplified}")
             
             return "\n".join(lines)
             
@@ -1997,6 +2046,41 @@ class ContextBudgetAllocator:
             logger.warning(f"向量召回失败: {e}")
         
         return ""
+
+    def _extract_recall_terms(self, text: str) -> List[str]:
+        terms = []
+        for token in re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,12}", text or ""):
+            if token in {"本章", "当前", "然后", "因为", "所以", "一个", "这个", "那个", "他们", "自己"}:
+                continue
+            terms.append(token)
+        return list(dict.fromkeys(terms))[:12]
+
+    def _simplify_vector_hit(self, text: str, outline_terms: List[str]) -> str:
+        sentences = self._split_context_sentences(text)
+        if not sentences:
+            return ""
+        scored: List[tuple[int, str]] = []
+        for sentence in sentences:
+            score = 0
+            score += sum(2 for term in outline_terms if term and term in sentence)
+            if re.search(r"伏笔|线索|承诺|未揭露|不能|必须|死亡|背叛|系统|监控|追踪|代价|伤疤|关系", sentence):
+                score += 2
+            if score > 0:
+                scored.append((score, sentence[:160]))
+        if not scored:
+            scored = [(1, sentences[-1][:160])]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        selected = []
+        seen = set()
+        for _, sentence in scored:
+            key = re.sub(r"\s+", "", sentence)
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(sentence)
+            if len(selected) >= 2:
+                break
+        return "；".join(selected)
     
     def _get_diagnosis_breakpoints(
         self,

@@ -29,5 +29,13 @@ variables:
   desc: 已有人物摘要
   type: string
   default: ''
+- name: style_guide
+  desc: 文风公约
+  type: string
+  default: ''
+- name: chain_context
+  desc: 链式生成上下文，包含故事创意原文、世界观、文风、人物摘要和一致性自检
+  type: string
+  default: ''
 id: bible-locations
 sort_order: 29

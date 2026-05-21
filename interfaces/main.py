@@ -163,6 +163,9 @@ async def fix_redirect_host(request, call_next):
 @app.on_event("startup")
 async def startup_event():
     """应用启动事件"""
+    from interfaces.api.middleware.logging_config import configure_uvicorn_access_logging
+
+    configure_uvicorn_access_logging()
     logger.info("📦 Loading modules and routes...")
     logger.info("✅ FastAPI application started successfully")
     logger.info(f"📊 Registered {len(app.routes)} routes")
@@ -323,6 +326,7 @@ _daemon_stop_event = None
 # 在启动守护进程前初始化，供 API 进程零 DB IO 读取实时状态
 _mp_manager: SyncManager | None = None
 _shared_state: dict | None = None
+_shared_state_cross_process = False
 
 
 def _get_shared_state() -> dict:
@@ -333,13 +337,29 @@ def _get_shared_state() -> dict:
     - API 进程读取：/status 和 SSE 直接读内存，零 DB IO，纳秒级响应
     - DB 只负责：核心业务数据固化（低频、可延迟）
     """
-    global _mp_manager, _shared_state
+    global _mp_manager, _shared_state, _shared_state_cross_process
     if _shared_state is not None:
         return _shared_state
-    _mp_manager = multiprocessing.Manager()
-    _shared_state = _mp_manager.dict()
-    logger.info("✅ 跨进程共享状态字典已初始化 (multiprocessing.Manager)")
+    try:
+        _mp_manager = multiprocessing.Manager()
+        _shared_state = _mp_manager.dict()
+        _shared_state_cross_process = True
+        logger.info("✅ 跨进程共享状态字典已初始化 (multiprocessing.Manager)")
+    except Exception as e:
+        _mp_manager = None
+        _shared_state = {}
+        _shared_state_cross_process = False
+        logger.warning(
+            "⚠️ 跨进程共享状态初始化失败，后端将以 API-only 降级模式启动（全托管守护进程不可用）: %s",
+            e,
+        )
     return _shared_state
+
+
+def _has_cross_process_shared_state() -> bool:
+    """共享状态是否可跨进程使用。"""
+    _get_shared_state()
+    return _shared_state_cross_process
 
 
 def update_shared_novel_state(novel_id: str, **fields) -> None:
@@ -657,6 +677,23 @@ def _start_autopilot_daemon_thread():
 
     # 初始化跨进程共享状态字典（必须在启动子进程前完成）
     shared_state = _get_shared_state()
+    if not _has_cross_process_shared_state():
+        logger.warning("⚠️ 跳过守护进程启动：当前环境无法创建 multiprocessing.Manager，共享状态已降级为进程内 dict")
+
+        from application.engine.services.shared_state_repository import (
+            init_shared_state_repository,
+        )
+        shared_state_repo = init_shared_state_repository(shared_state)
+        logger.info("✅ 共享状态仓库已初始化（API-only 降级模式）")
+
+        from application.engine.services.state_bootstrap import bootstrap_state
+        bootstrap_stats = bootstrap_state()
+        logger.info(f"✅ 状态已从 DB 加载到共享内存: {bootstrap_stats}")
+
+        from application.engine.services.query_service import init_query_service
+        init_query_service(shared_state_repo)
+        logger.info("✅ 查询服务已初始化（API-only 降级模式）")
+        return
 
     # 🔥 初始化共享状态仓库（内存优先读取的核心组件）
     from application.engine.services.shared_state_repository import (
@@ -1139,4 +1176,7 @@ if os.name == "nt":
 
 if __name__ == "__main__":
     import uvicorn
+    from interfaces.api.middleware.logging_config import configure_uvicorn_access_logging
+
+    configure_uvicorn_access_logging()
     uvicorn.run(app, host="0.0.0.0", port=8000)

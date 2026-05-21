@@ -1,0 +1,45 @@
+name: 精密宏观规划 · 单卷细化
+category: planning
+source: application/blueprint/services/continuous_planning_service.py::_build_precise_volume_prompt()
+description: 固定结构网格下，仅为当前卷及卷内幕生成 node_updates，避免一次性规划全书导致字段缺失。
+builtin: true
+tags:
+- 规划
+- JSON输出
+- 单卷细化
+output_format: json
+variables:
+- name: worldview_context
+  desc: 当前规划所需的世界观、角色和地点上下文。
+  type: string
+  required: true
+- name: target_chapters
+  desc: 目标总章数。
+  type: integer
+  required: true
+- name: parts
+  desc: 总部数。
+  type: integer
+  required: true
+- name: volumes_per_part
+  desc: 每部卷数。
+  type: integer
+  required: true
+- name: acts_per_volume
+  desc: 每卷幕数。
+  type: integer
+  required: true
+- name: avg_chapters_per_act
+  desc: 平均每幕章数。
+  type: integer
+  required: true
+- name: scope_block
+  desc: 当前卷的节点范围说明。
+  type: string
+  required: true
+- name: node_id_example
+  desc: 当前返回中可使用的 node_id 示例。
+  type: string
+  required: true
+id: planning-macro-volume
+sort_order: 25

@@ -19,5 +19,9 @@ variables:
   desc: 目标章节数
   type: integer
   required: true
+- name: chain_context
+  desc: 链式生成上下文，包含故事创意原文、档案锁、上游摘要和自检要求
+  type: string
+  default: ''
 id: bible-worldbuilding
 sort_order: 27

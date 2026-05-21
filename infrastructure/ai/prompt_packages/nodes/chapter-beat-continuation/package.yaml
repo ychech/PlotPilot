@@ -1,0 +1,21 @@
+name: 章节节拍续写上下文
+category: generation
+source: application/workflows/auto_novel_generation_workflow.py::_build_prompt()
+description: 分节拍生成时注入本章已写正文和动态连贯性要求，要求续写不复述、不改写已发生情节。
+builtin: true
+tags:
+- 节拍
+- 续写
+- 连贯性
+output_format: text
+variables:
+- name: prior_in_chapter
+  desc: 本章前序已生成正文。
+  type: string
+  required: true
+- name: coherence_rules
+  desc: 基于尾部锚点生成的连贯性要求。
+  type: string
+  required: true
+id: chapter-beat-continuation
+sort_order: 6
