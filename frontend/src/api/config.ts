@@ -268,6 +268,7 @@ export function subscribeChapterStream(
 
   void (async () => {
     let streamTerminal: 'stopped' | 'review' | 'idle' | null = null
+    let activeChapterNumber = 0
     try {
       const streamUrl = resolveHttpUrl(`/api/v1/autopilot/${novelId}/chapter-stream`)
       const res = await fetch(streamUrl, {
@@ -301,10 +302,18 @@ export function subscribeChapterStream(
             String(event.metadata.outline_plan_mode ?? ''),
           )
         } else if (event.type === 'chapter_start' && event.metadata?.chapter_number) {
+          activeChapterNumber = event.metadata.chapter_number
           handlers.onChapterStart?.(event.metadata.chapter_number)
         } else if (event.type === 'chapter_chunk' && event.metadata?.chunk) {
+          if (event.metadata.chapter_number && event.metadata.chapter_number !== activeChapterNumber) {
+            activeChapterNumber = event.metadata.chapter_number
+            handlers.onChapterStart?.(event.metadata.chapter_number)
+          }
           handlers.onChapterChunk?.(event.metadata.chunk, event.metadata.beat_index || 0)
         } else if (event.type === 'chapter_content' && event.metadata) {
+          if (event.metadata.chapter_number) {
+            activeChapterNumber = event.metadata.chapter_number
+          }
           handlers.onChapterContent?.({
             chapterNumber: event.metadata.chapter_number!,
             content: event.metadata.content || '',

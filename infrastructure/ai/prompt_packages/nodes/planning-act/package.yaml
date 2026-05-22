@@ -10,11 +10,11 @@ tags:
 output_format: json
 variables:
 - name: context
-  desc: 幕信息+上下文
+  desc: 压缩后的幕级规划输入，包含本幕目标、前情、故事内核锁摘要、世界观摘要、最多6个人物和6个地点；通常控制在2000字以内，不包含正文原文。
   type: string
   required: true
 - name: chapter_count
-  desc: 章节数量
+  desc: 本幕需要输出的章节数量，必须严格输出对应数量的 chapters 项
   type: integer
   required: true
 id: planning-act

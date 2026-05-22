@@ -223,7 +223,13 @@ class PromptRegistry:
             len(system), system[-2000:],
             len(user), user[-2000:],
         )
-        return Prompt(system=system, user=user)
+        node = self.get_node(node_key)
+        return Prompt(
+            system=system,
+            user=user,
+            node_key=node_key,
+            source=(node.source if node else "") or "prompt_registry.render_to_prompt",
+        )
 
     def mock_render(self, node_key: str) -> Optional[RenderResult]:
         """沙盒渲染（保存前校验）。

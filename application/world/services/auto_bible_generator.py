@@ -17,6 +17,7 @@ from application.world.worldbuilding_merge import (
     worldbuilding_entity_to_slices,
 )
 from application.core.novel_profile_lock import build_novel_profile_lock
+from application.core.premise_genre_world import parse_genre_world_from_premise
 from domain.bible.triple import Triple, SourceType
 from infrastructure.persistence.database.triple_repository import TripleRepository
 from domain.shared.exceptions import EntityNotFoundError
@@ -29,6 +30,12 @@ from infrastructure.ai.prompt_keys import (
 from infrastructure.ai.prompt_utils import render_prompt_text
 
 logger = logging.getLogger(__name__)
+
+_STORY_KERNEL_LIMIT = 520
+_CHAIN_PROFILE_LIMIT = 700
+_CHAIN_STYLE_LIMIT = 600
+_CHAIN_WORLDBUILDING_LIMIT = 900
+_CHARACTER_CONTEXT_LIMIT = 700
 
 
 # ============================================================================
@@ -304,6 +311,23 @@ def _parse_llm_json_to_dict(raw: str) -> Dict[str, Any]:
     if data is not None:
         return data
     raise json.JSONDecodeError(errs[0] if errs else "parse failed", raw, 0)
+
+
+def _coerce_string_list(value: Any, *, limit: int = 6) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[、,，;/；\n]+", str(value))
+    out: list[str] = []
+    for item in raw_items:
+        text = re.sub(r"\s+", " ", str(item or "")).strip()
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _infer_character_importance(char_data: Dict[str, Any]) -> str:
@@ -802,11 +826,20 @@ class AutoBibleGenerator:
             {
                 "stage": stage or "bible",
                 "target_chapters": str(target_chapters),
-                "premise": premise.strip(),
-                "profile_lock": profile_lock.strip(),
-                "worldbuilding_summary": self._summarize_worldbuilding(worldbuilding or {}),
-                "style_guide": style_guide.strip(),
-                "characters_summary": self._summarize_characters(characters or []),
+                "premise": self._build_story_kernel_brief(premise),
+                "profile_lock": self._compact_text(profile_lock, _CHAIN_PROFILE_LIMIT),
+                "worldbuilding_summary": self._summarize_worldbuilding(
+                    worldbuilding or {},
+                    max_chars=_CHAIN_WORLDBUILDING_LIMIT,
+                    max_item_chars=90,
+                ),
+                "style_guide": self._compact_text(style_guide, _CHAIN_STYLE_LIMIT),
+                "characters_summary": self._summarize_characters(
+                    characters or [],
+                    max_items=6,
+                    max_desc_chars=70,
+                    max_chars=_CHARACTER_CONTEXT_LIMIT,
+                ),
             },
         )
 
@@ -816,7 +849,10 @@ class AutoBibleGenerator:
 
         rendered = render_prompt(
             BIBLE_ALL,
-            {"premise": premise, "target_chapters": str(target_chapters)},
+            {
+                "premise": self._build_story_kernel_brief(premise),
+                "target_chapters": str(target_chapters),
+            },
         )
 
         bible_data = await self._call_llm_and_parse_with_retry(rendered["system"], rendered["user"])
@@ -1091,14 +1127,19 @@ class AutoBibleGenerator:
         from infrastructure.ai.prompt_utils import render_prompt
 
         variables = {
-            "premise": premise,
+            "premise": self._build_story_kernel_brief(premise),
             "target_chapters": str(target_chapters),
             "worldbuilding_summary": self._summarize_worldbuilding(worldbuilding or {}),
             "chain_context": chain_context,
         }
 
         rendered = render_prompt(BIBLE_STYLE_CONVENTION, variables)
-        prompt = Prompt(system=rendered["system"], user=rendered["user"])
+        prompt = Prompt(
+            system=rendered["system"],
+            user=rendered["user"],
+            node_key=BIBLE_STYLE_CONVENTION,
+            source="auto_bible.style",
+        )
 
         # max_tokens 只设宽裕上限防止极端超长，正常篇幅由 prompt 中的字数指引控制
         config = GenerationConfig(max_tokens=4096, temperature=0.7)
@@ -1145,7 +1186,13 @@ class AutoBibleGenerator:
                 rejected.append(str(key))
                 continue
             if isinstance(value, str):
-                text = value.strip()
+                item_plan = next((item for item in field_plan if item.get("field") == key), {})
+                text = self._normalize_worldbuilding_field_payload(
+                    value,
+                    field_label_cn=item_plan.get("field_label", key),
+                    dim_key=dim_key,
+                    field_key=key,
+                )
             elif isinstance(value, (list, dict)):
                 text = json.dumps(value, ensure_ascii=False)
             else:
@@ -1160,6 +1207,80 @@ class AutoBibleGenerator:
                 rejected,
             )
         return normalized
+
+    def _normalize_worldbuilding_field_payload(
+        self,
+        raw: str,
+        *,
+        field_label_cn: str,
+        dim_key: str,
+        field_key: str,
+    ) -> str:
+        """Normalize a single-field LLM response into stable JSON text.
+
+        Worldbuilding fields are stored as strings today, so we keep a compact
+        JSON string as the storage contract. Downstream prompt summaries extract
+        the useful quick_ref/summary text instead of injecting raw JSON noise.
+        """
+        text = (raw or "").strip()
+        payload: Dict[str, Any]
+        try:
+            parsed = _parse_llm_json_to_dict(_sanitize_llm_json_output(text))
+            payload = parsed if isinstance(parsed, dict) else {"summary": text}
+        except Exception:
+            payload = {"summary": text}
+
+        summary = str(payload.get("summary") or payload.get("description") or text).strip()
+        quick = payload.get("quick_ref") if isinstance(payload.get("quick_ref"), dict) else {}
+        label = str(quick.get("label") or field_label_cn).strip() or field_key
+
+        normalized = {
+            "summary": summary,
+            "quick_ref": {
+                "label": label,
+                "keywords": _coerce_string_list(quick.get("keywords"), limit=6),
+                "ladder": _coerce_string_list(quick.get("ladder"), limit=8),
+                "rules": _coerce_string_list(quick.get("rules"), limit=5),
+                "costs": _coerce_string_list(
+                    quick.get("costs") or quick.get("limits") or quick.get("risks"),
+                    limit=3,
+                ),
+            },
+        }
+        if not normalized["summary"]:
+            logger.warning("Worldbuilding field %s.%s normalized to empty summary", dim_key, field_key)
+        return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
+    def _worldbuilding_field_prompt_text(self, value: Any, *, limit: int = 180) -> str:
+        """Render stored field JSON into compact prompt-facing text."""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            parsed = _parse_llm_json_to_dict(text)
+        except Exception:
+            return self._compact_text(text, limit)
+        if not isinstance(parsed, dict):
+            return self._compact_text(text, limit)
+
+        summary = str(parsed.get("summary") or "").strip()
+        quick = parsed.get("quick_ref") if isinstance(parsed.get("quick_ref"), dict) else {}
+        parts: list[str] = []
+        kws = _coerce_string_list(quick.get("keywords"), limit=5)
+        ladder = _coerce_string_list(quick.get("ladder"), limit=4)
+        rules = _coerce_string_list(quick.get("rules"), limit=3)
+        costs = _coerce_string_list(quick.get("costs"), limit=2)
+        if kws:
+            parts.append("关键词：" + "、".join(kws))
+        if ladder:
+            parts.append("结构：" + " / ".join(ladder))
+        if rules:
+            parts.append("规则：" + "；".join(rules))
+        if costs:
+            parts.append("代价：" + "；".join(costs))
+        if summary:
+            parts.append("说明：" + summary)
+        return self._compact_text("；".join(parts) if parts else text, limit)
 
     async def _complete_dimension_storage_fields(
         self,
@@ -1186,6 +1307,10 @@ class AutoBibleGenerator:
             logger.warning("Worldbuilding dimension %s missing storage fields: %s", dim_key, missing)
 
         for field_key in missing:
+            field_item = next(
+                (item for item in field_plan if item.get("field") == field_key),
+                {},
+            )
             generated = await self._generate_single_field(
                 premise,
                 target_chapters,
@@ -1196,7 +1321,12 @@ class AutoBibleGenerator:
                 chain_context=chain_context,
             )
             if generated:
-                completed[field_key] = generated
+                completed[field_key] = self._normalize_worldbuilding_field_payload(
+                    generated,
+                    field_label_cn=field_item.get("field_label", field_key),
+                    dim_key=dim_key,
+                    field_key=field_key,
+                )
         return completed
 
     async def _generate_worldbuilding_field_first(
@@ -1224,7 +1354,12 @@ class AutoBibleGenerator:
                 chain_context=chain_context,
             )
             if value:
-                worldbuilding[dim_key][field_key] = value.strip()
+                worldbuilding[dim_key][field_key] = self._normalize_worldbuilding_field_payload(
+                    value,
+                    field_label_cn=item.get("field_label", field_key),
+                    dim_key=dim_key,
+                    field_key=field_key,
+                )
         return worldbuilding
 
     async def _stream_worldbuilding_fields(
@@ -1264,6 +1399,12 @@ class AutoBibleGenerator:
 
             value = "".join(chunks).strip()
             if value:
+                value = self._normalize_worldbuilding_field_payload(
+                    value,
+                    field_label_cn=item.get("field_label", field_key),
+                    dim_key=dim_key,
+                    field_key=field_key,
+                )
                 worldbuilding[dim_key][field_key] = value
                 yield {
                     "type": "field_done",
@@ -1323,7 +1464,7 @@ class AutoBibleGenerator:
             BIBLE_WORLDBUILDING_DIMENSION,
             {
                 "dim_label": dim_label,
-                "premise": premise,
+                "premise": self._build_story_kernel_brief(premise),
                 "target_chapters": str(target_chapters),
                 "context_block": context_block,
                 "fields_desc": fields_desc,
@@ -1334,7 +1475,13 @@ class AutoBibleGenerator:
         try:
             config = GenerationConfig(max_tokens=4096, temperature=0.7)
             result_raw = await self.llm_service.generate(
-                Prompt(system=rendered["system"], user=rendered["user"]), config
+                Prompt(
+                    system=rendered["system"],
+                    user=rendered["user"],
+                    node_key=BIBLE_WORLDBUILDING_DIMENSION,
+                    source="auto_bible.worldbuilding_dimension",
+                ),
+                config,
             )
             raw_text = result_raw.content if hasattr(result_raw, "content") else str(result_raw)
             result = _parse_llm_json_to_dict(_sanitize_llm_json_output(raw_text))
@@ -1408,7 +1555,7 @@ class AutoBibleGenerator:
             BIBLE_WORLDBUILDING_DIMENSION,
             {
                 "dim_label": dim_label,
-                "premise": premise,
+                "premise": self._build_story_kernel_brief(premise),
                 "target_chapters": str(target_chapters),
                 "context_block": context_block,
                 "fields_desc": fields_desc,
@@ -1417,7 +1564,12 @@ class AutoBibleGenerator:
         )
 
         try:
-            prompt = Prompt(system=rendered["system"], user=rendered["user"])
+            prompt = Prompt(
+                system=rendered["system"],
+                user=rendered["user"],
+                node_key=BIBLE_WORLDBUILDING_DIMENSION,
+                source="auto_bible.worldbuilding_dimension_stream",
+            )
             config = GenerationConfig(max_tokens=4096, temperature=0.7)
             async for chunk in self.llm_service.stream_generate(prompt, config):
                 yield chunk
@@ -1496,23 +1648,30 @@ class AutoBibleGenerator:
         dim_label = field_item.get("dimension_label", dim_key)
         field_desc = field_item.get("field_desc", "")
         field_label_cn = field_item.get("field_label", field_key)
+        field_length_rule = self._worldbuilding_field_length_rule(dim_key, field_key)
 
         # 构建已生成维度的上下文
         context_block = ""
         if existing_worldbuilding:
-            context_parts = []
-            for dk, dv in existing_worldbuilding.items():
-                if dv and isinstance(dv, dict):
-                    items = ", ".join(f"{fk}: {fv}" for fk, fv in dv.items() if fv)
-                    if items:
-                        context_parts.append(f"- {dk}: {items}")
-            context_block = "\n".join(context_parts)
+            context_summary = self._summarize_worldbuilding(
+                existing_worldbuilding,
+                max_chars=700,
+                max_item_chars=70,
+            )
+            if context_summary and context_summary != "无":
+                context_block = f"\n\n已生成世界观摘要：\n{context_summary}"
 
         # 构建同维度已生成字段的上下文
         sibling_block = ""
         if existing_dim_fields:
-            sibling_parts = [f"  - {fk}: {fv}" for fk, fv in existing_dim_fields.items() if fv]
+            sibling_parts = [
+                f"  - {fk}: {self._worldbuilding_field_prompt_text(fv, limit=120)}"
+                for fk, fv in existing_dim_fields.items()
+                if fv
+            ]
             sibling_block = "\n".join(sibling_parts)
+            if sibling_block:
+                sibling_block = f"\n\n同维度已生成字段：\n{sibling_block}"
 
         from infrastructure.ai.prompt_utils import render_prompt
 
@@ -1521,9 +1680,10 @@ class AutoBibleGenerator:
             {
                 "dim_label": dim_label,
                 "field_label_cn": field_label_cn,
-                "premise": premise,
+                "premise": self._build_story_kernel_brief(premise),
                 "target_chapters": str(target_chapters),
                 "field_desc": field_desc,
+                "field_length_rule": field_length_rule,
                 "context_block": context_block,
                 "sibling_block": sibling_block,
                 "chain_context": chain_context,
@@ -1531,8 +1691,13 @@ class AutoBibleGenerator:
         )
 
         try:
-            prompt = Prompt(system=rendered["system"], user=rendered["user"])
-            config = GenerationConfig(max_tokens=1024, temperature=0.7)
+            prompt = Prompt(
+                system=rendered["system"],
+                user=rendered["user"],
+                node_key=BIBLE_WORLDBUILDING_FIELD,
+                source=f"auto_bible.worldbuilding_field.{dim_key}.{field_key}",
+            )
+            config = GenerationConfig(max_tokens=2400, temperature=0.7)
             async for chunk in self.llm_service.stream_generate(prompt, config):
                 yield chunk
         except Exception as e:
@@ -1549,14 +1714,18 @@ class AutoBibleGenerator:
         chain_context: str = "",
     ) -> Dict[str, Any]:
         """基于世界观生成人物"""
-        wb_summary = self._summarize_worldbuilding(worldbuilding)
+        wb_summary = self._summarize_worldbuilding(
+            worldbuilding,
+            max_chars=1200,
+            max_item_chars=100,
+        )
 
         from infrastructure.ai.prompt_utils import render_prompt
 
         rendered = render_prompt(
             BIBLE_CHARACTERS,
             {
-                "premise": premise,
+                "premise": self._build_story_kernel_brief(premise),
                 "target_chapters": str(target_chapters),
                 "worldbuilding": wb_summary,
                 "style_guide": style_guide,
@@ -1586,14 +1755,18 @@ class AutoBibleGenerator:
             {"type": "chunk", "text": str}   — 原始 token（可选，用于调试/进度）
             {"type": "done", "count": int}   — 全部完成
         """
-        wb_summary = self._summarize_worldbuilding(worldbuilding)
+        wb_summary = self._summarize_worldbuilding(
+            worldbuilding,
+            max_chars=1200,
+            max_item_chars=100,
+        )
 
         from infrastructure.ai.prompt_utils import render_prompt
 
         rendered = render_prompt(
             BIBLE_CHARACTERS,
             {
-                "premise": premise,
+                "premise": self._build_story_kernel_brief(premise),
                 "target_chapters": str(target_chapters),
                 "worldbuilding": wb_summary,
                 "style_guide": style_guide,
@@ -1601,7 +1774,12 @@ class AutoBibleGenerator:
                 "chain_context": chain_context,
             },
         )
-        prompt = Prompt(system=rendered["system"], user=rendered["user"])
+        prompt = Prompt(
+            system=rendered["system"],
+            user=rendered["user"],
+            node_key=BIBLE_CHARACTERS,
+            source="auto_bible.characters",
+        )
         config = GenerationConfig(max_tokens=4096, temperature=0.7)
 
         buf = ""
@@ -1646,15 +1824,24 @@ class AutoBibleGenerator:
         chain_context: str = "",
     ) -> Dict[str, Any]:
         """基于世界观和人物生成地点"""
-        wb_summary = self._summarize_worldbuilding(worldbuilding)
-        char_summary = self._summarize_characters(characters)
+        wb_summary = self._summarize_worldbuilding(
+            worldbuilding,
+            max_chars=1000,
+            max_item_chars=90,
+        )
+        char_summary = self._summarize_characters(
+            characters,
+            max_items=6,
+            max_desc_chars=70,
+            max_chars=_CHARACTER_CONTEXT_LIMIT,
+        )
 
         from infrastructure.ai.prompt_utils import render_prompt
 
         rendered = render_prompt(
             BIBLE_LOCATIONS,
             {
-                "premise": premise,
+                "premise": self._build_story_kernel_brief(premise),
                 "target_chapters": str(target_chapters),
                 "worldbuilding": wb_summary,
                 "existing_locations": "",
@@ -1683,15 +1870,24 @@ class AutoBibleGenerator:
 
         Yields: 同 _stream_generate_characters，type 为 location
         """
-        wb_summary = self._summarize_worldbuilding(worldbuilding)
-        char_summary = self._summarize_characters(characters)
+        wb_summary = self._summarize_worldbuilding(
+            worldbuilding,
+            max_chars=1000,
+            max_item_chars=90,
+        )
+        char_summary = self._summarize_characters(
+            characters,
+            max_items=6,
+            max_desc_chars=70,
+            max_chars=_CHARACTER_CONTEXT_LIMIT,
+        )
 
         from infrastructure.ai.prompt_utils import render_prompt
 
         rendered = render_prompt(
             BIBLE_LOCATIONS,
             {
-                "premise": premise,
+                "premise": self._build_story_kernel_brief(premise),
                 "target_chapters": str(target_chapters),
                 "worldbuilding": wb_summary,
                 "existing_locations": "",
@@ -1700,7 +1896,12 @@ class AutoBibleGenerator:
                 "chain_context": chain_context,
             },
         )
-        prompt = Prompt(system=rendered["system"], user=rendered["user"])
+        prompt = Prompt(
+            system=rendered["system"],
+            user=rendered["user"],
+            node_key=BIBLE_LOCATIONS,
+            source="auto_bible.locations",
+        )
         config = GenerationConfig(max_tokens=4096, temperature=0.7)
 
         buf = ""
@@ -1731,7 +1932,116 @@ class AutoBibleGenerator:
 
         yield {"type": "done", "count": loc_index}
 
-    def _summarize_worldbuilding(self, wb: Dict[str, Any]) -> str:
+    @staticmethod
+    def _compact_text(text: str, limit: int) -> str:
+        compact = re.sub(r"\s+", " ", str(text or "")).strip()
+        if limit <= 0 or len(compact) <= limit:
+            return compact
+        return compact[: max(0, limit - 3)].rstrip() + "..."
+
+    @staticmethod
+    def _split_chinese_sentences(text: str) -> list[str]:
+        normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not normalized:
+            return []
+        parts = re.findall(r"[^。！？!?；;]+[。！？!?；;]?", normalized)
+        return [part.strip() for part in parts if part.strip()]
+
+    @staticmethod
+    def _join_sentences_with_limit(sentences: list[str], limit: int) -> str:
+        if limit <= 0:
+            return " ".join(sentences).strip()
+        selected: list[str] = []
+        total = 0
+        for sentence in sentences:
+            next_total = total + len(sentence) + (1 if selected else 0)
+            if selected and next_total > limit:
+                break
+            if not selected and len(sentence) > limit:
+                break
+            selected.append(sentence)
+            total = next_total
+        if selected:
+            return " ".join(selected).strip()
+        compact = re.sub(r"\s+", " ", " ".join(sentences)).strip()
+        if len(compact) <= limit:
+            return compact
+        cut = compact[:limit].rstrip()
+        boundary = max(cut.rfind(p) for p in ("。", "！", "？", ".", "!", "?"))
+        if boundary >= max(20, int(limit * 0.45)):
+            return cut[: boundary + 1].strip()
+        return cut
+
+    def _build_story_kernel_brief(self, premise: str, limit: int = _STORY_KERNEL_LIMIT) -> str:
+        """Extract a compact story kernel without blindly cutting the raw premise."""
+        text = str(premise or "").strip()
+        if not text:
+            return ""
+
+        genre, world_tone = parse_genre_world_from_premise(text)
+        meta_lines: list[str] = []
+        if genre:
+            meta_lines.append(f"类型：{genre}")
+        if world_tone:
+            meta_lines.append(f"世界观基调：{world_tone}")
+
+        # Drop internal planning blocks while keeping user-facing metadata already
+        # extracted above. These blocks are operational constraints, not story facts.
+        body = re.sub(r"【系统内部[^】]*】", "", text, flags=re.IGNORECASE)
+        body = re.sub(
+            r"(?:^|\n)\s*(?:规划目标体量|目标体量|预计体量|章节规划)[:：].*(?=\n|$)",
+            "\n",
+            body,
+        )
+        body = re.sub(r"【类型：[^】]+】", "", body)
+        body = re.sub(r"\[[^\]]*(?:TYPE|GENRE|WORLD|TONE)[^\]]*\]", "", body, flags=re.IGNORECASE)
+        body = re.sub(r"\s+", " ", body).strip()
+
+        sentences = self._split_chinese_sentences(body)
+        if not sentences:
+            return "\n".join(meta_lines).strip()
+
+        priority_keywords = (
+            "主角", "男主", "女主", "少年", "少女", "穿越", "重生",
+            "系统", "金手指", "能力", "天赋", "规则", "代价", "限制",
+            "危机", "敌", "仇", "追杀", "背叛", "阴谋", "目标", "必须",
+            "想要", "为了", "卷入", "发现", "秘密", "真相",
+        )
+        selected: list[str] = []
+        for sentence in sentences[:2]:
+            if sentence not in selected:
+                selected.append(sentence)
+        for sentence in sentences:
+            if any(keyword in sentence for keyword in priority_keywords) and sentence not in selected:
+                selected.append(sentence)
+            if len(selected) >= 6:
+                break
+
+        meta_text = "\n".join(meta_lines)
+        body_limit = max(120, limit - len(meta_text) - (2 if meta_text else 0))
+        body_text = self._join_sentences_with_limit(selected, body_limit)
+        result = "\n".join(part for part in (meta_text, body_text) if part).strip()
+        if len(result) <= limit:
+            return result
+        return self._join_sentences_with_limit(self._split_chinese_sentences(result), limit)
+
+    @staticmethod
+    def _worldbuilding_field_length_rule(dim_key: str, field_key: str) -> str:
+        concise_fields = {"power_system", "physics_rules", "magic_tech"}
+        expansive_dims = {"geography", "society", "culture", "daily_life"}
+        if field_key in concise_fields:
+            return "写清体系即可，目标120-220字：规则、层级、代价、限制、和主角/冲突的关系要闭合，不追求铺陈。"
+        if dim_key in expansive_dims:
+            return "目标220-420字：允许具体展开场景、资源、阶层、历史或日常细节，但每句话都要服务冲突和长期剧情。"
+        return "目标160-300字：完整交代核心规则和剧情用途，不要半句截断。"
+
+    def _summarize_worldbuilding(
+        self,
+        wb: Dict[str, Any],
+        *,
+        max_chars: int = 1600,
+        max_item_chars: int = 140,
+    ) -> str:
         """总结世界观为文本"""
         if not wb:
             return "无"
@@ -1739,16 +2049,29 @@ class AutoBibleGenerator:
         parts = []
         for key, value in wb.items():
             if isinstance(value, dict):
-                items = ", ".join([f"{k}: {v}" for k, v in value.items() if v])
-                parts.append(f"{key}: {items}")
-        return "\n".join(parts)
+                items = ", ".join(
+                    f"{k}: {self._worldbuilding_field_prompt_text(v, limit=max_item_chars)}"
+                    for k, v in value.items()
+                    if v
+                )
+                if items:
+                    parts.append(f"{key}: {items}")
+        text = "\n".join(parts)
+        return self._compact_text(text, max_chars) if text else "无"
 
-    def _summarize_characters(self, characters: list) -> str:
+    def _summarize_characters(
+        self,
+        characters: list,
+        *,
+        max_items: int = 8,
+        max_desc_chars: int = 100,
+        max_chars: int = 1000,
+    ) -> str:
         """Summarize character dicts or DTOs for downstream prompt context."""
         if not characters:
             return "无"
         parts: list[str] = []
-        for item in characters[:12]:
+        for item in characters[:max_items]:
             if isinstance(item, dict):
                 name = str(item.get("name") or "未命名")
                 role = str(item.get("role") or "")
@@ -1758,8 +2081,8 @@ class AutoBibleGenerator:
                 role = str(getattr(item, "role", ""))
                 desc = str(getattr(item, "description", ""))
             label = f"{name}（{role}）" if role else name
-            parts.append(f"- {label}: {desc[:120]}")
-        return "\n".join(parts)
+            parts.append(f"- {label}: {self._compact_text(desc, max_desc_chars)}")
+        return self._compact_text("\n".join(parts), max_chars)
 
     async def _call_llm_and_parse(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         """调用 LLM 并解析 JSON（含自动修复）"""

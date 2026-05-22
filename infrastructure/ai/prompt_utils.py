@@ -93,6 +93,12 @@ def render_prompt(
         registry = get_prompt_registry()
         result = registry.render(node_key, variables)
         if result and (result.system or result.user):
+            logger.info(
+                "━━━ Prompt[%s] ━━━ source=registry system=%d chars user=%d chars",
+                node_key,
+                len(result.system or fallback_system or ""),
+                len(result.user or fallback_user or ""),
+            )
             return {
                 "system": result.system or fallback_system,
                 "user": result.user or fallback_user,
@@ -102,12 +108,24 @@ def render_prompt(
 
     package_rendered = _render_from_package_node(node_key, variables or {})
     if package_rendered and (package_rendered["system"] or package_rendered["user"]):
+        logger.info(
+            "━━━ Prompt[%s] ━━━ source=package system=%d chars user=%d chars",
+            node_key,
+            len(package_rendered.get("system", "")),
+            len(package_rendered.get("user", "")),
+        )
         return package_rendered
 
     # Fallback: simple format_map rendering
     var_map = variables or {}
     system = _simple_render(fallback_system, var_map)
     user = _simple_render(fallback_user, var_map)
+    logger.info(
+        "━━━ Prompt[%s] ━━━ source=fallback system=%d chars user=%d chars",
+        node_key,
+        len(system or ""),
+        len(user or ""),
+    )
     return {"system": system, "user": user}
 
 

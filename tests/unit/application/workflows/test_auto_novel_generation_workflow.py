@@ -328,7 +328,7 @@ class TestBuildPrompt:
             outline="Chapter outline"
         )
 
-        assert "Full context" in prompt.system
+        assert "Full context" in prompt.user
         assert "Chapter outline" in prompt.user
         assert "行文目标" in prompt.system
 
@@ -342,7 +342,56 @@ class TestBuildPrompt:
         )
         assert "主线" in prompt.system
         assert "HIGH" in prompt.system
-        assert "CTX" in prompt.system
+        assert "CTX" in prompt.user
+
+    def test_prompt_includes_frontend_novel_tags_once(self, workflow):
+        """前端建书标签应进入章节正文主提示词，且不通过文风锁重复注入。"""
+        workflow._current_novel_tags_lock = (
+            "【小说标签与类型承诺】\n"
+            "- 市场分区/题材标签：高武/系统\n"
+            "- 世界观基调：近未来废土\n"
+            "- 标签清单：高武、系统、近未来废土"
+        )
+
+        prompt = workflow._build_prompt(
+            context="CTX",
+            outline="林渊在废弃训练场觉醒系统。",
+            chapter_target_words=2500,
+        )
+
+        combined = prompt.system + "\n" + prompt.user
+        assert "【小说标签】" in prompt.system
+        assert "高武/系统" in prompt.system
+        assert "近未来废土" in prompt.system
+        assert "类型边界" in prompt.system
+        assert "未被标签、梗概、Bible 明示的相邻题材不能自动混入" in prompt.system
+        assert prompt.system.count("小说标签与类型承诺") == 1
+        assert "{novel_tags}" not in combined
+
+    def test_prepare_chapter_generation_loads_frontend_tags(self, workflow):
+        """自动托管/流式共用 prepare 时，应从 novel.premise 前缀激活题材标签。"""
+        from domain.novel.entities.novel import Novel
+
+        novel = Novel(
+            id=NovelId("novel-tags"),
+            title="灰烬武道",
+            author="yc",
+            target_chapters=30,
+            premise="【类型：高武/系统；世界观基调：近未来废土】\n\n少年在旧城训练场觉醒。",
+        )
+        workflow.context_builder.novel_repository = Mock()
+        workflow.context_builder.novel_repository.get_by_id.return_value = novel
+
+        bundle = workflow.prepare_chapter_generation(
+            novel_id="novel-tags",
+            chapter_number=1,
+            outline="林渊在废弃训练场觉醒系统。",
+        )
+
+        assert "高武/系统" in bundle["novel_tags"]
+        assert "近未来废土" in bundle["novel_tags"]
+        assert "高武" in bundle["novel_tags"]
+        assert workflow._current_novel_tags_lock == bundle["novel_tags"]
 
 class TestConflictDetectionIntegration:
     """测试冲突检测集成"""
@@ -840,6 +889,36 @@ class TestQualityGate:
         assert "正文原文" * 20 not in context
         assert "召回原文" * 20 not in context
 
+    def test_assembled_context_rejects_large_raw_injection_shape(self):
+        payload = {
+            "layer1_text": (
+                "bible_full_text\n"
+                + "世界设定原文" * 5000
+                + "\n角色锚点：林渊不能改名\nFACT_LOCK：系统来源不能提前揭露"
+            ),
+            "layer2_text": (
+                "recent_5_chapters\n"
+                + "最近章节正文原文" * 8000
+                + "\n第 4 章：旧城训练场\n"
+                "- 已发生结果：林渊确认自己被赵镜监控\n"
+                "- 未解决压力：倒计时继续跳动"
+            ),
+            "layer3_text": (
+                "worldbuilding_all\n"
+                + "远期召回原文" * 4000
+                + "\n[第 2 章] 赵镜的追踪权限来自协会，伏笔仍未揭露"
+            ),
+        }
+
+        context = assemble_chapter_bundle_context_text(payload)
+
+        assert "林渊不能改名" in context
+        assert "赵镜的追踪权限" in context
+        assert "世界设定原文" * 20 not in context
+        assert "最近章节正文原文" * 20 not in context
+        assert "远期召回原文" * 20 not in context
+        assert len(context) < 8000
+
     def test_context_alignment_protocol_has_fallback_priority(self, workflow):
         protocol = workflow._build_context_alignment_protocol("context", "outline")
 
@@ -891,6 +970,41 @@ class TestQualityGate:
         assert "【作家风格】高武废土叙述者" in prompt.system
         assert "【题材专项规则】力量体系要有压迫感" in prompt.system
         assert "{behavior_protocol}" not in prompt.system
+
+    def test_prompt_frontloads_novel_style_lock_with_bible_style(self, workflow):
+        from domain.bible.entities.bible import Bible
+        from domain.bible.entities.style_note import StyleNote
+
+        bible = Bible(id="bible-1", novel_id=NovelId("novel-1"))
+        bible.add_style_note(StyleNote(
+            id="style-1",
+            category="文风公约",
+            content="冷峻克制，动作和代价先行，不写空泛抒情。",
+        ))
+        repo = Mock()
+        repo.get_by_novel_id.return_value = bible
+        workflow.bible_repository = repo
+        workflow._current_novel_id = "novel-1"
+        workflow._current_profile_lock = (
+            "## 故事内核锁（不可变）\n"
+            "- 题材/赛道：玄幻升级\n"
+            "- 世界观基调：丹武修行"
+        )
+
+        prompt = workflow._build_prompt(
+            "CTX",
+            "测试大纲",
+            style_summary="平均句长偏短，动作密度高。",
+            chapter_target_words=2500,
+        )
+
+        assert "【本书题材与文风锁】" in prompt.system
+        assert "题材/赛道：玄幻升级" in prompt.system
+        assert "世界观基调：丹武修行" in prompt.system
+        assert "【Bible 文风公约】" in prompt.system
+        assert "冷峻克制" in prompt.system
+        assert "平均句长偏短" in prompt.system
+        assert "不得突然改成设定说明、剧本分镜、状态面板" in prompt.system
 
     def test_main_prompt_uses_user_template_and_has_no_unknown_placeholders(self, workflow):
         prompt = workflow._build_prompt(

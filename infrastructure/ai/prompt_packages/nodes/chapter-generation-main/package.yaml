@@ -14,6 +14,15 @@ tags:
 - 章节闭环
 - 第三人称限制视角
 variables:
+- name: novel_tags
+  desc: 建书前端选择的短题材标签和世界观基调，来自 novels.premise 中的类型/世界观前缀，例如“玄幻/高武/系统/废土”。这是最短但优先级最高的类型承诺锚点之一。
+  type: string
+  required: false
+  default: ''
+  source: AutoNovelGenerationWorkflow._load_novel_tags_lock
+  priority: critical
+  prompt_role: genre_market_positioning
+  empty_behavior: 可为空；旧书没有前端标签时跳过。
 - name: style_guide
   desc: 文风公约全文。从 Bible.style_notes 中提取的"文风公约"类别内容，指导本章的叙事视角、语调、节奏、氛围等。
   type: string
@@ -25,16 +34,16 @@ variables:
   empty_behavior: 可为空；没有文风公约时使用默认第三人称限制视角。
   editor_note: 这是控制全文叙述腔调的核心变量，优先级高于其他风格辅助信息。
 - name: context
-  desc: 章节主上下文聚合块。由 ContextBuilder.build_structured_context 生成，并由 assemble_chapter_bundle_context_text 拼成 Layer1 + RECENT CHAPTERS + VECTOR RECALL。它是模型写正文时的主要事实来源，不是给模型复述的材料。
+  desc: 章节主上下文聚合块。由 ContextBuilder.build_structured_context 生成，并由 assemble_chapter_bundle_context_text 二次提炼成 CONTEXT FOCUS + 硬约束/叙事备忘 + RECENT CHAPTERS + VECTOR RECALL。它是模型写正文时的事实简报，不允许直接注入 bible_full_text、worldbuilding_all、recent_5_chapters 等大段原文。
   type: context_bundle
   required: true
   source: AutoNovelGenerationWorkflow.prepare_chapter_generation
   builder: ContextBuilder.build_structured_context
   contains:
-  - layer1_text: Bible、主线锚点、角色状态、叙事债务、FACT_LOCK 等高优先级约束
-  - layer2_text: RECENT CHAPTERS，近期章节正文/摘要，用于承接状态和连续性
-  - layer3_text: VECTOR RECALL，向量召回的远期相关历史，用于避免遗忘
-  token_budget: 35000
+  - layer1_text: Bible、主线锚点、角色状态、叙事债务、FACT_LOCK 等高优先级约束，经关键词提炼后保留约 3600 字符
+  - layer2_text: RECENT CHAPTERS，只保留最近章节承接简报、阶段结果、未解决压力和可接续画面，约 1800 字符
+  - layer3_text: VECTOR RECALL，向量召回命中会先简化为远期记忆提要，约 800 字符
+  token_budget: 5000
   priority: high
   prompt_role: background_constraints
   empty_behavior: 不建议为空；为空时生成质量会明显下降，应检查上下文构建和数据库内容。
@@ -78,6 +87,15 @@ variables:
   priority: high
   prompt_role: narrative_control
   empty_behavior: 可为空；为空时只缺少宏观规划/风格辅助，不应阻塞生成。
+- name: novel_style_lock
+  desc: 本书题材与文风锁。由建档故事内核锁、Bible 文风公约、声纹摘要和 Theme 题材规则压缩而成，靠前注入正文 system，规定全书长期语气、题材承诺、世界观基调和禁止漂移项。
+  type: string
+  required: false
+  default: ''
+  source: AutoNovelGenerationWorkflow._build_novel_style_lock
+  priority: critical
+  prompt_role: style_and_genre_lock
+  empty_behavior: 可为空；没有建档/Bible/声纹资产时使用正文模板默认网文写作目标。
 - name: voice_block
   desc: 角色声线与肢体语言锚点。用于保持人物对白、口癖、小动作和表达习惯一致。
   type: string

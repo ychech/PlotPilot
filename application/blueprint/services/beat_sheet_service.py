@@ -407,7 +407,12 @@ class BeatSheetService:
         if timeline_block:
             user += f"\n=== 时间线（最近事件） ===\n{timeline_block}\n"
         user += "\n请基于以上信息生成场景列表（JSON 格式）："
-        return Prompt(system=system, user=user)
+        return Prompt(
+            system=system,
+            user=user,
+            node_key=BEAT_SHEET_DECOMPOSITION,
+            source="beat_sheet_service.fallback",
+        )
 
     def _parse_llm_response(self, response) -> List[Scene]:
         """解析 LLM 响应，提取场景列表"""

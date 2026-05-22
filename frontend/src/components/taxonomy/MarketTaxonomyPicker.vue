@@ -205,13 +205,13 @@ function pickMajor(root: TaxonomyNode) {
   pickedThemeId.value = first?.id ?? null
 
   genre.value = first ? marketMajorThemeGenre(root, first, props.locale) : ''
-  worldPreset.value = worldToneForSelection(root)
+  worldPreset.value = worldToneForSelection(root, first)
 }
 
 function pickTheme(root: TaxonomyNode, leaf: TaxonomyNode) {
   pickedThemeId.value = leaf.id
   genre.value = marketMajorThemeGenre(root, leaf, props.locale)
-  worldPreset.value = worldToneForSelection(root)
+  worldPreset.value = worldToneForSelection(root, leaf)
 }
 
 const themeAgentKeyDisplay = computed(() => {

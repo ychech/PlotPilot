@@ -1,0 +1,16 @@
+name: Novel title generate
+category: creative
+source: interfaces/api/v1/core/novels.py::generate_title()
+description: Generate a short commercial Chinese webnovel title from the story premise
+builtin: true
+tags:
+- title
+- novel
+- creative
+variables:
+- name: premise
+  desc: Story premise or kernel
+  type: string
+  required: true
+id: novel-title-generate
+sort_order: 60

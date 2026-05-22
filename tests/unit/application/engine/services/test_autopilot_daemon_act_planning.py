@@ -1,4 +1,6 @@
 from application.engine.services.autopilot_daemon import AutopilotDaemon
+from domain.novel.entities.novel import AutopilotStatus, Novel, NovelStage
+from domain.novel.value_objects.novel_id import NovelId
 from domain.structure.story_node import NodeType, StoryNode
 
 
@@ -100,3 +102,87 @@ def test_basic_chapter_ending_accepts_closed_sentence():
     )
 
     assert daemon._assess_basic_chapter_ending("林渊抬起头，看见门缝里的水雾重新凝成一线。") == []
+
+
+class _StageRepo:
+    def __init__(self, nodes):
+        self.nodes = nodes
+
+    def get_by_novel_sync(self, novel_id):
+        return self.nodes
+
+    def get_children_sync(self, node_id):
+        return [n for n in self.nodes if n.parent_id == node_id]
+
+
+def test_stage_after_auto_review_writes_when_current_act_has_chapters():
+    act = StoryNode(
+        id="act-n1-1",
+        novel_id="n1",
+        node_type=NodeType.ACT,
+        number=1,
+        title="第一幕",
+        order_index=1,
+    )
+    chapter = StoryNode(
+        id="chapter-n1-chapter-1",
+        novel_id="n1",
+        parent_id=act.id,
+        node_type=NodeType.CHAPTER,
+        number=1,
+        title="第一章",
+        order_index=2,
+    )
+    daemon = AutopilotDaemon(
+        novel_repository=None,
+        llm_service=None,
+        context_builder=None,
+        background_task_service=None,
+        planning_service=None,
+        story_node_repo=_StageRepo([act, chapter]),
+        chapter_repository=None,
+    )
+    novel = Novel(
+        id=NovelId("n1"),
+        title="t",
+        author="a",
+        target_chapters=3,
+        autopilot_status=AutopilotStatus.RUNNING,
+        auto_approve_mode=True,
+        current_stage=NovelStage.PAUSED_FOR_REVIEW,
+        current_act=0,
+    )
+
+    assert daemon._stage_after_auto_review(novel) == NovelStage.WRITING
+
+
+def test_stage_after_auto_review_plans_when_current_act_has_no_chapters():
+    act = StoryNode(
+        id="act-n1-1",
+        novel_id="n1",
+        node_type=NodeType.ACT,
+        number=1,
+        title="第一幕",
+        order_index=1,
+    )
+    daemon = AutopilotDaemon(
+        novel_repository=None,
+        llm_service=None,
+        context_builder=None,
+        background_task_service=None,
+        planning_service=None,
+        story_node_repo=_StageRepo([act]),
+        chapter_repository=None,
+    )
+    novel = Novel(
+        id=NovelId("n1"),
+        title="t",
+        author="a",
+        target_chapters=3,
+        autopilot_status=AutopilotStatus.RUNNING,
+        auto_approve_mode=True,
+        current_stage=NovelStage.PAUSED_FOR_REVIEW,
+        current_act=0,
+    )
+
+    assert daemon._stage_after_auto_review(novel) == NovelStage.ACT_PLANNING

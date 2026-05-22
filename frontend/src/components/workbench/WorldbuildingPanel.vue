@@ -35,6 +35,7 @@
             <n-space vertical :size="12">
               <div class="field-group">
                 <label class="field-label">力量体系/科技树</label>
+                <WorldbuildingFieldSummary :value="formData.core_rules.power_system" compact />
                 <n-input
                   v-model:value="formData.core_rules.power_system"
                   type="textarea"
@@ -45,6 +46,7 @@
 
               <div class="field-group">
                 <label class="field-label">物理规律</label>
+                <WorldbuildingFieldSummary :value="formData.core_rules.physics_rules" compact />
                 <n-input
                   v-model:value="formData.core_rules.physics_rules"
                   type="textarea"
@@ -55,6 +57,7 @@
 
               <div class="field-group">
                 <label class="field-label">魔法/科技机制</label>
+                <WorldbuildingFieldSummary :value="formData.core_rules.magic_tech" compact />
                 <n-input
                   v-model:value="formData.core_rules.magic_tech"
                   type="textarea"
@@ -80,6 +83,7 @@
             <n-space vertical :size="12">
               <div class="field-group">
                 <label class="field-label">地形</label>
+                <WorldbuildingFieldSummary :value="formData.geography.terrain" compact />
                 <n-input
                   v-model:value="formData.geography.terrain"
                   type="textarea"
@@ -90,6 +94,7 @@
 
               <div class="field-group">
                 <label class="field-label">气候</label>
+                <WorldbuildingFieldSummary :value="formData.geography.climate" compact />
                 <n-input
                   v-model:value="formData.geography.climate"
                   type="textarea"
@@ -100,6 +105,7 @@
 
               <div class="field-group">
                 <label class="field-label">资源分布</label>
+                <WorldbuildingFieldSummary :value="formData.geography.resources" compact />
                 <n-input
                   v-model:value="formData.geography.resources"
                   type="textarea"
@@ -110,6 +116,7 @@
 
               <div class="field-group">
                 <label class="field-label">生态链</label>
+                <WorldbuildingFieldSummary :value="formData.geography.ecology" compact />
                 <n-input
                   v-model:value="formData.geography.ecology"
                   type="textarea"
@@ -135,6 +142,7 @@
             <n-space vertical :size="12">
               <div class="field-group">
                 <label class="field-label">政治体制</label>
+                <WorldbuildingFieldSummary :value="formData.society.politics" compact />
                 <n-input
                   v-model:value="formData.society.politics"
                   type="textarea"
@@ -145,6 +153,7 @@
 
               <div class="field-group">
                 <label class="field-label">经济模式</label>
+                <WorldbuildingFieldSummary :value="formData.society.economy" compact />
                 <n-input
                   v-model:value="formData.society.economy"
                   type="textarea"
@@ -155,6 +164,7 @@
 
               <div class="field-group">
                 <label class="field-label">阶级系统</label>
+                <WorldbuildingFieldSummary :value="formData.society.class_system" compact />
                 <n-input
                   v-model:value="formData.society.class_system"
                   type="textarea"
@@ -180,6 +190,7 @@
             <n-space vertical :size="12">
               <div class="field-group">
                 <label class="field-label">关键历史事件</label>
+                <WorldbuildingFieldSummary :value="formData.culture.history" compact />
                 <n-input
                   v-model:value="formData.culture.history"
                   type="textarea"
@@ -190,6 +201,7 @@
 
               <div class="field-group">
                 <label class="field-label">宗教信仰</label>
+                <WorldbuildingFieldSummary :value="formData.culture.religion" compact />
                 <n-input
                   v-model:value="formData.culture.religion"
                   type="textarea"
@@ -200,6 +212,7 @@
 
               <div class="field-group">
                 <label class="field-label">文化禁忌</label>
+                <WorldbuildingFieldSummary :value="formData.culture.taboos" compact />
                 <n-input
                   v-model:value="formData.culture.taboos"
                   type="textarea"
@@ -225,6 +238,7 @@
             <n-space vertical :size="12">
               <div class="field-group">
                 <label class="field-label">衣食住行</label>
+                <WorldbuildingFieldSummary :value="formData.daily_life.food_clothing" compact />
                 <n-input
                   v-model:value="formData.daily_life.food_clothing"
                   type="textarea"
@@ -235,6 +249,7 @@
 
               <div class="field-group">
                 <label class="field-label">俚语与口音</label>
+                <WorldbuildingFieldSummary :value="formData.daily_life.language_slang" compact />
                 <n-input
                   v-model:value="formData.daily_life.language_slang"
                   type="textarea"
@@ -245,6 +260,7 @@
 
               <div class="field-group">
                 <label class="field-label">娱乐方式</label>
+                <WorldbuildingFieldSummary :value="formData.daily_life.entertainment" compact />
                 <n-input
                   v-model:value="formData.daily_life.entertainment"
                   type="textarea"
@@ -273,6 +289,7 @@
 import { ref, onMounted, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import { worldbuildingApi } from '@/api/worldbuilding'
+import WorldbuildingFieldSummary from '@/components/onboarding/WorldbuildingFieldSummary.vue'
 
 interface Props {
   slug: string

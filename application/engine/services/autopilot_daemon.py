@@ -104,6 +104,7 @@ class AutopilotDaemon:
         # 章节"节拍耗尽但字数不足"重写计数器，key=(novel_id, chapter_num)
         # 防止清除重写陷入新的无限循环
         self._beat_exhausted_rewrite_count: Dict[tuple, int] = {}
+        self._chapter_closure_repair_failures: Dict[tuple, int] = {}
 
         #: 本章写作阶段产生的 Beat 快照，供章后叙事同步写入 micro_beats（非章纲句读切分）
         self._pending_chapter_micro_beats: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
@@ -759,6 +760,28 @@ class AutopilotDaemon:
         except Exception as e:
             logger.debug(f"[{novel.novel_id.value}] 按章号校正 current_act 失败（可忽略）: {e}")
 
+    def _stage_after_auto_review(self, novel: Novel) -> NovelStage:
+        """全自动跳过审阅后的下一阶段。"""
+        nid = novel.novel_id.value
+        try:
+            target_act_number = (novel.current_act or 0) + 1
+            all_nodes = self.story_node_repo.get_by_novel_sync(nid)
+            act_node = next(
+                (
+                    n
+                    for n in all_nodes
+                    if n.node_type.value == "act" and int(n.number) == target_act_number
+                ),
+                None,
+            )
+            if act_node:
+                children = self.story_node_repo.get_children_sync(act_node.id)
+                if any(ch.node_type.value == "chapter" for ch in children):
+                    return NovelStage.WRITING
+        except Exception as e:
+            logger.debug("[%s] 自动审阅恢复阶段判断失败，回退幕级规划: %s", nid, e)
+        return NovelStage.ACT_PLANNING
+
     def _cache_stats_to_shared_memory(self, novel: Novel) -> None:
         """将「非统计」状态同步到共享内存（节拍 / flush 高频路径）。
 
@@ -1014,8 +1037,16 @@ class AutopilotDaemon:
                 + (f" issues={result.issues}" if result.issues else "")
             )
 
-            # 衔接度低于 0.6，自动修整
-            if result.score < 0.6 and result.issues:
+            # 衔接度低时自动修整；若前章留下鉴定/宣判等流程结果，阈值更严格。
+            strict_bridge = False
+            try:
+                strict_bridge = svc._requires_direct_resolution(
+                    f"{prev_bridge.unfinished_actions} {prev_bridge.suspense_hook}"
+                )
+            except Exception:
+                strict_bridge = False
+            threshold = 0.6 if strict_bridge else 0.4
+            if result.score < threshold and result.issues:
                 logger.warning(
                     f"[{novel_id}] 🔗 衔接度低 ({result.score:.2f})，自动修整首段 ch={chapter_number}"
                 )
@@ -1189,12 +1220,11 @@ class AutopilotDaemon:
             elif novel.current_stage == NovelStage.PAUSED_FOR_REVIEW:
                 # 全自动模式：跳过审阅，直接进入下一阶段
                 if getattr(novel, 'auto_approve_mode', False):
-                    logger.info(f"[{novel.novel_id}] 🚀 全自动模式：跳过人工审阅")
-                    # 根据当前状态自动进入下一阶段
-                    # 宏观规划完成后 -> 幕级规划
-                    # 幕级规划完成后 -> 写作
-                    # 写作完成后 -> 审计
-                    novel.current_stage = NovelStage.ACT_PLANNING
+                    next_stage = self._stage_after_auto_review(novel)
+                    logger.info(
+                        f"[{novel.novel_id}] 🚀 全自动模式：跳过人工审阅，进入 {next_stage.value}"
+                    )
+                    novel.current_stage = next_stage
                     self._save_novel_state(novel)
                     return
                 else:
@@ -2009,15 +2039,26 @@ class AutopilotDaemon:
                         reasons=closure_reasons,
                     )
                     if not closure_ok:
-                        await self._upsert_chapter_content(
-                            novel, next_chapter_node, existing_content, status="draft"
-                        )
-                        self._flush_novel(novel)
-                        logger.warning(
-                            f"[{novel.novel_id}] 第 {chapter_num} 章已有长稿但结尾修复后仍未闭环，"
-                            f"保持 draft：{'; '.join(closure_reasons)}"
-                        )
-                        return
+                        if self._record_closure_repair_failure(
+                            novel.novel_id.value, chapter_num, closure_reasons
+                        ):
+                            logger.warning(
+                                f"[{novel.novel_id}] 第 {chapter_num} 章章末闭环软失败已重试，"
+                                f"当前无硬截断，放行避免卡死：{'; '.join(closure_reasons)}"
+                            )
+                            closure_ok = True
+                        else:
+                            await self._upsert_chapter_content(
+                                novel, next_chapter_node, existing_content, status="draft"
+                            )
+                            self._flush_novel(novel)
+                            logger.warning(
+                                f"[{novel.novel_id}] 第 {chapter_num} 章已有长稿但结尾修复后仍未闭环，"
+                                f"保持 draft：{'; '.join(closure_reasons)}"
+                            )
+                            return
+                    if closure_ok:
+                        self._clear_closure_repair_failures(novel.novel_id.value, chapter_num)
                 # 长度已接近目标时，优先把当前稿修尾收章，避免重启后从第 1 拍重复扩写。
                 beats_all_done = True
             if nb > 0 and not beats_all_done:
@@ -2039,15 +2080,24 @@ class AutopilotDaemon:
                         reasons=closure_reasons,
                     )
                     if not closure_ok:
-                        await self._upsert_chapter_content(
-                            novel, next_chapter_node, existing_content, status="draft"
-                        )
-                        self._flush_novel(novel)
-                        logger.warning(
-                            f"[{novel.novel_id}] 第 {chapter_num} 章已有正文但结尾未闭环，"
-                            f"保持 draft：{'; '.join(closure_reasons)}"
-                        )
-                        return
+                        if self._record_closure_repair_failure(
+                            novel.novel_id.value, chapter_num, closure_reasons
+                        ):
+                            logger.warning(
+                                f"[{novel.novel_id}] 第 {chapter_num} 章章末闭环软失败已重试，"
+                                f"当前无硬截断，放行避免卡死：{'; '.join(closure_reasons)}"
+                            )
+                        else:
+                            await self._upsert_chapter_content(
+                                novel, next_chapter_node, existing_content, status="draft"
+                            )
+                            self._flush_novel(novel)
+                            logger.warning(
+                                f"[{novel.novel_id}] 第 {chapter_num} 章已有正文但结尾未闭环，"
+                                f"保持 draft：{'; '.join(closure_reasons)}"
+                            )
+                            return
+                    self._clear_closure_repair_failures(novel.novel_id.value, chapter_num)
 
                 logger.info(
                     f"[{novel.novel_id}] 章节 {chapter_num} 已有 {len(existing_content)} 字 "
@@ -2628,17 +2678,26 @@ class AutopilotDaemon:
                 reasons=closure_reasons,
             )
             if not closure_ok:
-                await self._upsert_chapter_content(
-                    novel, next_chapter_node, chapter_content, status="draft"
-                )
-                novel.beats_completed = True
-                novel.current_beat_index = total_beats_count
-                self._flush_novel(novel)
-                logger.warning(
-                    f"[{novel.novel_id}] ⚠️ 第 {chapter_num} 章结尾未形成正常章节收束，"
-                    f"不标记 completed：{'; '.join(closure_reasons)}"
-                )
-                return
+                if self._record_closure_repair_failure(
+                    novel.novel_id.value, chapter_num, closure_reasons
+                ):
+                    logger.warning(
+                        f"[{novel.novel_id}] 第 {chapter_num} 章章末闭环软失败已重试，"
+                        f"当前无硬截断，放行避免卡死：{'; '.join(closure_reasons)}"
+                    )
+                else:
+                    await self._upsert_chapter_content(
+                        novel, next_chapter_node, chapter_content, status="draft"
+                    )
+                    novel.beats_completed = True
+                    novel.current_beat_index = total_beats_count
+                    self._flush_novel(novel)
+                    logger.warning(
+                        f"[{novel.novel_id}] ⚠️ 第 {chapter_num} 章结尾未形成正常章节收束，"
+                        f"不标记 completed：{'; '.join(closure_reasons)}"
+                    )
+                    return
+            self._clear_closure_repair_failures(novel.novel_id.value, chapter_num)
             actual_word_count = len(chapter_content.strip())
 
         # 8. 更新计数器，重置节拍状态
@@ -2806,6 +2865,18 @@ class AutopilotDaemon:
             hook_has_landing_image = bool(re.search(landed_hook_pattern, new_event_text[-160:]))
             if not has_result_after and not (has_result_before and hook_has_landing_image):
                 reasons.append("章节结尾停在新事件刚出现的位置，缺少阶段性结果")
+        final_paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text) if p.strip()]
+        final_paragraph = final_paragraphs[-1][-260:] if final_paragraphs else tail[-260:]
+        pending_procedure = re.search(
+            r"(请|传|召|等|待|叫|宣|宣布|交给|送去|带去|押去)[^。！？]{0,80}"
+            r"(鉴师|长老|执事|族老|堂主|审判|审问|鉴定|检测|复核|裁决|宣判|处置|验明|查验)",
+            final_paragraph,
+        )
+        if pending_procedure and not re.search(
+            r"(结果|结论|确认|证实|判定|定为|剥夺|逐出|暂入|发配|处置|落定|当场宣布|宣判)",
+            final_paragraph,
+        ):
+            reasons.append("章节结尾停在鉴定、宣判、审问或处置即将发生的位置，下一步结果未兑现")
         return list(dict.fromkeys(reasons))
 
     def _assess_basic_chapter_ending(self, content: str) -> List[str]:
@@ -2828,6 +2899,28 @@ class AutopilotDaemon:
         return normalize_prose_punctuation(
             strip_prose_control_artifacts(strip_reasoning_artifacts(raw or ""))
         ).strip()
+
+    def _record_closure_repair_failure(
+        self,
+        novel_id: str,
+        chapter_num: int,
+        reasons: List[str],
+    ) -> bool:
+        """Return True when repeated soft closure failures should stop blocking progress."""
+        key = (novel_id, chapter_num)
+        count = self._chapter_closure_repair_failures.get(key, 0) + 1
+        self._chapter_closure_repair_failures[key] = count
+        hard_labels = {
+            "正文为空",
+            "章节结尾疑似句子未写完",
+            "章节结尾疑似对白未闭合",
+            "章节结尾停在动作或发现刚开始的位置",
+        }
+        has_hard_cut = any(str(reason) in hard_labels for reason in reasons)
+        return count >= 2 and not has_hard_cut
+
+    def _clear_closure_repair_failures(self, novel_id: str, chapter_num: int) -> None:
+        self._chapter_closure_repair_failures.pop((novel_id, chapter_num), None)
 
     async def _repair_chapter_final_closure(
         self,
@@ -2861,23 +2954,22 @@ class AutopilotDaemon:
         )
 
         tail = text[-1400:]
+        from infrastructure.ai.prompt_keys import CHAPTER_TAIL_CLOSURE_REPAIR
+        from infrastructure.ai.prompt_utils import render_prompt
+
+        rendered = render_prompt(
+            CHAPTER_TAIL_CLOSURE_REPAIR,
+            {
+                "outline": outline,
+                "reason_text": reason_text,
+                "tail": tail,
+            },
+        )
         prompt = Prompt(
-            system=(
-                "你是网络小说章节收尾修复编辑。你只负责给现有章节补一个自然结尾，"
-                "不能重写前文，不能新增与大纲冲突的设定，不能输出解释。"
-            ),
-            user=(
-                "下面这章已经写到末尾，但结尾未形成正常章节收束。\n\n"
-                f"【本章大纲】\n{outline}\n\n"
-                f"【未通过原因】\n{reason_text}\n\n"
-                f"【章节末尾】\n{tail}\n\n"
-                "请只输出要追加在原文后面的续写段落，220-520字。\n"
-                "要求：\n"
-                "1. 从最后一句最后一个动作接着写，保留原文主体，不裁掉、不改写前文。\n"
-                "2. 先让本章核心事件完成阶段性结果：信息确认、目标成败、代价显现、角色选择、关系变化、危机解决或危机升级，至少满足一种。\n"
-                "3. 结尾要有下一章钩子，但钩子落在本章结果之后，用具体动作、对白、物件变化或画面收束。\n"
-                "4. 避免破折号、八股总结句、规则复述、标题和解释；不要停在刚开口、门刚开、提示刚亮、异象刚发生、动作刚开始的位置。"
-            ),
+            system=rendered["system"],
+            user=rendered["user"],
+            node_key=CHAPTER_TAIL_CLOSURE_REPAIR,
+            source="autopilot_daemon.repair_chapter_final_closure",
         )
 
         try:

@@ -201,7 +201,8 @@ const idleHint = computed(() => {
   }
   if (!props.showRunnerStageInIdle) {
     if (subPrimary) return '流式正文将出现在下方；当前阶段见顶栏。'
-    return fallback
+    if (displayChapter.value > 0) return fallback
+    return '正在准备章节正文；进入撰写后将显示流式内容。'
   }
   if (subPrimary) return runnerStageLabelDisplay.value
   return runnerStageLabelDisplay.value || fallback

@@ -1,0 +1,24 @@
+name: Chapter tail closure repair
+category: generation
+source: application/engine/services/autopilot_daemon.py::_repair_chapter_final_closure()
+description: Append a natural ending to a generated chapter when the tail is unfinished
+builtin: true
+tags:
+- chapter
+- repair
+- closure
+variables:
+- name: outline
+  desc: Chapter outline
+  type: string
+  required: true
+- name: reason_text
+  desc: Closure gate failure reasons
+  type: string
+  required: true
+- name: tail
+  desc: Chapter tail excerpt
+  type: string
+  required: true
+id: chapter-tail-closure-repair
+sort_order: 61

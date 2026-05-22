@@ -11,13 +11,13 @@ tags:
 output_format: text
 variables:
 - name: context
-  desc: 章节主上下文聚合块；由 ContextBuilder.build_structured_context 生成，通常包含 Layer1、RECENT CHAPTERS、VECTOR RECALL。
+  desc: 章节主上下文聚合块；由 ContextBuilder.build_structured_context 生成，并由 assemble_chapter_bundle_context_text 二次提炼，通常包含 CONTEXT FOCUS、硬约束/叙事备忘、RECENT CHAPTERS、VECTOR RECALL。不得直接注入 bible_full_text、worldbuilding_all、recent_5_chapters 等大段原文。
   type: string
   required: true
   source: AutoNovelGenerationWorkflow.prepare_chapter_generation
   builder: ContextBuilder.build_structured_context
   prompt_role: background_constraints
-  token_budget: 35000
+  token_budget: 5000
   empty_behavior: 生成不应依赖空 context；若为空，优先检查上下文构建器和数据源。
   editor_note: 模板中要求模型内化并对齐 context，正文自然承接即可。
 - name: outline

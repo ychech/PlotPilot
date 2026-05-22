@@ -30,6 +30,7 @@ BIBLE_LOCATIONS = "bible-locations"
 BIBLE_STYLE_CONVENTION = "bible-style-convention"
 BIBLE_CHAIN_CONTEXT = "bible-chain-context"
 NOVEL_PROFILE_LOCK = "novel-profile-lock"
+NOVEL_TITLE_GENERATE = "novel-title-generate"
 LLM_JSON_RETRY_REMINDER = "llm-json-retry-reminder"
 
 # ── Chapter generation ───────────────────────────────────────────────────
@@ -51,6 +52,7 @@ CHAPTER_SUMMARIZER = "chapter-summarizer"
 CHAPTER_BRIDGE_EXTRACT = "chapter-bridge-extract"
 CHAPTER_BRIDGE_CHECK = "chapter-bridge-check"
 CHAPTER_BRIDGE_FIX = "chapter-bridge-fix"
+CHAPTER_TAIL_CLOSURE_REPAIR = "chapter-tail-closure-repair"
 
 # ── Scene ────────────────────────────────────────────────────────────────
 SCENE_GENERATION = "scene-generation"
@@ -134,7 +136,7 @@ ALL_KEYS: frozenset[str] = frozenset({
     # Bible
     BIBLE_ALL, BIBLE_WORLDBUILDING, BIBLE_CHARACTERS, BIBLE_LOCATIONS,
     BIBLE_STYLE_CONVENTION, BIBLE_WORLDBUILDING_DIMENSION, BIBLE_WORLDBUILDING_FIELD,
-    BIBLE_CHAIN_CONTEXT, NOVEL_PROFILE_LOCK, LLM_JSON_RETRY_REMINDER,
+    BIBLE_CHAIN_CONTEXT, NOVEL_PROFILE_LOCK, NOVEL_TITLE_GENERATE, LLM_JSON_RETRY_REMINDER,
     # Chapter
     CHAPTER_GENERATION_MAIN, CHAPTER_GENERATION_BASIC,
     CHAPTER_CONTEXT_ALIGNMENT, CHAPTER_QUALITY_REPAIR,
@@ -144,6 +146,7 @@ ALL_KEYS: frozenset[str] = frozenset({
     CHAPTER_SHUANGWEN_DIRECTIVE, CHAPTER_OUTLINE_SUGGEST,
     CHAPTER_NARRATIVE_SYNC, CHAPTER_STATE_EXTRACTION, CHAPTER_SUMMARIZER,
     CHAPTER_BRIDGE_EXTRACT, CHAPTER_BRIDGE_CHECK, CHAPTER_BRIDGE_FIX,
+    CHAPTER_TAIL_CLOSURE_REPAIR,
     # Scene
     SCENE_GENERATION, SCENE_DIRECTOR, BEAT_SHEET_DECOMPOSITION,
     # Dialogue

@@ -12,22 +12,32 @@ from infrastructure.ai.prompt_utils import render_prompt_text
 
 
 def _extract_bracket_meta(premise: str) -> dict[str, str]:
-    """Extract lightweight metadata from leading Chinese bracket blocks."""
-    match = re.match(r"^\s*【([^】]+)】", premise or "")
-    if not match:
-        return {}
+    """Extract lightweight metadata from Chinese bracket blocks.
+
+    ``premise`` may start with an internal length-planning block before the
+    user-facing genre block, so scan all early bracket blocks and pick known
+    metadata keys instead of only inspecting the first one.
+    """
+    text = premise or ""
 
     meta: dict[str, str] = {}
-    for part in re.split(r"[;；]", match.group(1)):
-        if not part.strip():
-            continue
-        if ":" in part:
-            key, value = part.split(":", 1)
-        elif "：" in part:
-            key, value = part.split("：", 1)
-        else:
-            continue
-        meta[key.strip()] = value.strip()
+    for match in re.finditer(r"【([^】]+)】", text):
+        block = match.group(1)
+        for part in re.split(r"[;；]", block):
+            if not part.strip():
+                continue
+            if ":" in part:
+                key, value = part.split(":", 1)
+            elif "：" in part:
+                key, value = part.split("：", 1)
+            else:
+                continue
+            key = key.strip()
+            if key in {"类型", "题材", "赛道", "世界观基调", "基调"}:
+                meta[key] = value.strip()
+        if meta.get("类型") or meta.get("题材") or meta.get("赛道"):
+            if meta.get("世界观基调") or meta.get("基调"):
+                break
     return meta
 
 

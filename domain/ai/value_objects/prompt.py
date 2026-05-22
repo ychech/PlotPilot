@@ -8,6 +8,8 @@ class Prompt:
     """提示词值对象"""
     system: str
     user: str
+    node_key: str = ""
+    source: str = ""
 
     def __post_init__(self):
         if not self.user or not self.user.strip():

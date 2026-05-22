@@ -53,7 +53,7 @@
                 <div v-for="(val, key) in worldbuildingData.core_rules" :key="key"
                   class="field-card" :class="{ 'field-card--streaming': activeDimension === 'core_rules' && activeField === key }">
                   <div class="field-card__title">{{ dimKeyLabels[key] || key }}</div>
-                  <div class="field-card__content">{{ val }}<span v-if="activeDimension === 'core_rules' && activeField === key" class="streaming-cursor">▎</span></div>
+                  <div class="field-card__content">{{ formatWorldbuildingFieldPreview(val) }}<span v-if="activeDimension === 'core_rules' && activeField === key" class="streaming-cursor">▎</span></div>
                 </div>
               </div>
             </template>
@@ -62,7 +62,7 @@
                 <div v-for="(val, key) in worldbuildingData.geography" :key="key"
                   class="field-card" :class="{ 'field-card--streaming': activeDimension === 'geography' && activeField === key }">
                   <div class="field-card__title">{{ dimKeyLabels[key] || key }}</div>
-                  <div class="field-card__content">{{ val }}<span v-if="activeDimension === 'geography' && activeField === key" class="streaming-cursor">▎</span></div>
+                  <div class="field-card__content">{{ formatWorldbuildingFieldPreview(val) }}<span v-if="activeDimension === 'geography' && activeField === key" class="streaming-cursor">▎</span></div>
                 </div>
               </div>
             </template>
@@ -71,7 +71,7 @@
                 <div v-for="(val, key) in worldbuildingData.society" :key="key"
                   class="field-card" :class="{ 'field-card--streaming': activeDimension === 'society' && activeField === key }">
                   <div class="field-card__title">{{ dimKeyLabels[key] || key }}</div>
-                  <div class="field-card__content">{{ val }}<span v-if="activeDimension === 'society' && activeField === key" class="streaming-cursor">▎</span></div>
+                  <div class="field-card__content">{{ formatWorldbuildingFieldPreview(val) }}<span v-if="activeDimension === 'society' && activeField === key" class="streaming-cursor">▎</span></div>
                 </div>
               </div>
             </template>
@@ -80,7 +80,7 @@
                 <div v-for="(val, key) in worldbuildingData.culture" :key="key"
                   class="field-card" :class="{ 'field-card--streaming': activeDimension === 'culture' && activeField === key }">
                   <div class="field-card__title">{{ dimKeyLabels[key] || key }}</div>
-                  <div class="field-card__content">{{ val }}<span v-if="activeDimension === 'culture' && activeField === key" class="streaming-cursor">▎</span></div>
+                  <div class="field-card__content">{{ formatWorldbuildingFieldPreview(val) }}<span v-if="activeDimension === 'culture' && activeField === key" class="streaming-cursor">▎</span></div>
                 </div>
               </div>
             </template>
@@ -89,20 +89,24 @@
                 <div v-for="(val, key) in worldbuildingData.daily_life" :key="key"
                   class="field-card" :class="{ 'field-card--streaming': activeDimension === 'daily_life' && activeField === key }">
                   <div class="field-card__title">{{ dimKeyLabels[key] || key }}</div>
-                  <div class="field-card__content">{{ val }}<span v-if="activeDimension === 'daily_life' && activeField === key" class="streaming-cursor">▎</span></div>
+                  <div class="field-card__content">{{ formatWorldbuildingFieldPreview(val) }}<span v-if="activeDimension === 'daily_life' && activeField === key" class="streaming-cursor">▎</span></div>
                 </div>
               </div>
             </template>
           </WizardSkeleton>
 
           <!-- 文风公约实时预览（SSE 生成中即可见） -->
-          <div v-if="styleText" class="style-preview-generating">
+          <div class="style-preview-generating">
             <div class="style-preview-header">
-              <n-icon size="16" color="#18a058"><IconCheck /></n-icon>
+              <n-icon v-if="styleConventionDisplay" size="16" color="#18a058"><IconCheck /></n-icon>
               <span class="style-preview-title">文风公约</span>
-              <n-tag size="tiny" type="success">已生成</n-tag>
+              <n-tag size="tiny" :type="styleConventionDisplay ? 'success' : 'default'">
+                {{ styleConventionDisplay ? '已生成' : '等待生成' }}
+              </n-tag>
             </div>
-            <div class="style-preview-content">{{ styleText }}</div>
+            <div class="style-preview-content" :class="{ 'style-preview-content--empty': !styleConventionDisplay }">
+              {{ styleConventionDisplay || '世界观五维度完成后，将基于本书题材、世界规则和叙事节奏生成文风公约。' }}
+            </div>
           </div>
         </div>
 
@@ -119,6 +123,7 @@
                   <div class="dimension-fields">
                     <div v-for="(_val, key) in dim.data" :key="key" class="field-card field-card--editable">
                       <div class="field-card__title">{{ dimKeyLabels[key] || key }}</div>
+                      <WorldbuildingFieldSummary :value="worldbuildingData[dim.key][key]" compact />
                       <n-input
                         v-model:value="worldbuildingData[dim.key][key]"
                         type="textarea"
@@ -139,6 +144,9 @@
                   :autosize="{ minRows: 3, maxRows: 10 }"
                   placeholder="文风公约"
                 />
+                <n-text v-if="!styleText.trim()" depth="3" style="display: block; margin-top: 8px; font-size: 12px">
+                  当前 Bible 里没有文风公约。可点击“重新生成”，或先手动填写后再继续。
+                </n-text>
               </n-card>
             </n-collapse-item>
           </n-collapse>
@@ -570,6 +578,7 @@ import { workflowApi, type MainPlotOptionDTO } from '@/api/workflow'
 import { characterPsycheApi } from '@/api/engineCore'
 import { resolveHttpUrl } from '@/api/config'
 import BibleLocationsGraphPreview from './BibleLocationsGraphPreview.vue'
+import WorldbuildingFieldSummary from './WorldbuildingFieldSummary.vue'
 import WizardSkeleton from './WizardSkeleton.vue'
 import {
   clearWizardUiCache,
@@ -581,6 +590,7 @@ import {
   type WizardUiCachePayload,
 } from '@/utils/wizardStageCache'
 import { drawGachaFullName } from '@/utils/characterNameGacha'
+import { formatWorldbuildingFieldPreview } from '@/utils/worldbuildingField'
 
 const WB_DIMS = ['core_rules', 'geography', 'society', 'culture', 'daily_life'] as const
 
@@ -2211,6 +2221,11 @@ const handleComplete = () => {
   line-height: 1.6;
   color: #444;
   padding-left: 24px;
+}
+
+.style-preview-content--empty {
+  color: #777;
+  padding-left: 0;
 }
 
 @keyframes fade-in {

@@ -13,6 +13,8 @@ from application.core.chapter_target_limits import CHAPTER_TARGET_WORDS_MAX, CHA
 from domain.ai.value_objects.prompt import Prompt
 from domain.ai.services.llm_service import GenerationConfig
 from application.core.novel_profile_lock import build_story_kernel, suggest_title_from_kernel
+from infrastructure.ai.prompt_keys import NOVEL_TITLE_GENERATE
+from infrastructure.ai.prompt_utils import render_prompt
 from interfaces.api.dependencies import (
     get_novel_service,
     get_auto_bible_generator,
@@ -157,16 +159,16 @@ async def generate_title(
     llm=Depends(get_llm_service),
 ):
     """用 AI 从梗概生成书名"""
-    system = (
-        "你是一位资深网文编辑。根据故事梗概提炼一个简洁有力的网文书名。"
-        "梗概句只是故事内核，不是书名；不得照抄整句梗概，不得输出解释。"
-        "书名控制在2到8个汉字，不需要书名号，直出书名。"
-    )
-    user = f"故事内核/梗概：\n{request.premise}\n\n请从主角承诺、关键物件/资源、题材规则或终局身份中提炼书名："
+    rendered = render_prompt(NOVEL_TITLE_GENERATE, {"premise": request.premise})
 
     try:
         result = await llm.generate(
-            Prompt(system=system, user=user),
+            Prompt(
+                system=rendered["system"],
+                user=rendered["user"],
+                node_key=NOVEL_TITLE_GENERATE,
+                source="interfaces.core.novels.generate_title",
+            ),
             GenerationConfig(max_tokens=60, temperature=0.8),
         )
         title = _clean_generated_title(result.content)

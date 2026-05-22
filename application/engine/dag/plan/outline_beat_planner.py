@@ -273,9 +273,15 @@ async def llm_decompose_outline(
     try:
         from domain.ai.services.llm_service import GenerationConfig
         from domain.ai.value_objects.prompt import Prompt
+        from infrastructure.ai.prompt_keys import OUTLINE_BEAT_PARTITION
 
         llm = _resolve_llm_service(llm_service)
-        prompt = Prompt(system=system.strip() if system else "", user=user)
+        prompt = Prompt(
+            system=system.strip() if system else "",
+            user=user,
+            node_key=OUTLINE_BEAT_PARTITION,
+            source="outline_beat_planner.llm_decompose_outline",
+        )
         config = GenerationConfig(max_tokens=2000, temperature=0.45)
         pieces: List[str] = []
         async for piece in llm.stream_generate(prompt, config):

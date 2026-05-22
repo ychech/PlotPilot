@@ -123,6 +123,7 @@ def _persist_autopilot_running_sync(
     max_auto_chapters: int,
     target_chapters: int,
     target_words_per_chapter: int,
+    auto_approve_mode: Optional[bool] = None,
 ) -> None:
     """将 RUNNING 写入 DB 并等待持久化队列落盘。
 
@@ -145,16 +146,19 @@ def _persist_autopilot_running_sync(
     else:
         patch_stage = novel.current_stage
 
-    repo.patch(
-        NovelId(novel_id),
-        autopilot_status=AutopilotStatus.RUNNING,
-        max_auto_chapters=max_auto_chapters,
-        current_auto_chapters=novel.current_auto_chapters or 0,
-        consecutive_error_count=0,
-        target_chapters=target_chapters,
-        target_words_per_chapter=target_words_per_chapter,
-        current_stage=patch_stage,
-    )
+    patch_fields = {
+        "autopilot_status": AutopilotStatus.RUNNING,
+        "max_auto_chapters": max_auto_chapters,
+        "current_auto_chapters": novel.current_auto_chapters or 0,
+        "consecutive_error_count": 0,
+        "target_chapters": target_chapters,
+        "target_words_per_chapter": target_words_per_chapter,
+        "current_stage": patch_stage,
+    }
+    if auto_approve_mode is not None:
+        patch_fields["auto_approve_mode"] = bool(auto_approve_mode)
+
+    repo.patch(NovelId(novel_id), **patch_fields)
 
     pq = get_persistence_queue()
     if pq is not None:
@@ -1159,6 +1163,10 @@ class StartRequest(BaseModel):
         le=CHAPTER_TARGET_WORDS_MAX,
         description="每章目标字数（与 chapter_target_limits 上限对齐）",
     )
+    auto_approve_mode: Optional[bool] = Field(
+        default=None,
+        description="是否跳过人工审阅；与启动请求原子落库，避免守护进程读到旧值",
+    )
 
 
 @router.post("/{novel_id}/start")
@@ -1269,6 +1277,11 @@ async def start_autopilot(novel_id: str, body: StartRequest = StartRequest()):
         resolved_tc = _clamp_autopilot_target_chapters(body.target_chapters)
     if body.target_words_per_chapter is not None:
         resolved_twpc = _clamp_autopilot_words_per_chapter(body.target_words_per_chapter)
+    resolved_auto_approve = bool(
+        body.auto_approve_mode
+        if body.auto_approve_mode is not None
+        else (shared.get("auto_approve_mode", False) if shared else False)
+    )
 
     # ── 第二步：立即写入共享内存（前端立即可见）──
     try:
@@ -1282,6 +1295,7 @@ async def start_autopilot(novel_id: str, body: StartRequest = StartRequest()):
             consecutive_error_count=0,
             target_chapters=resolved_tc,
             target_words_per_chapter=resolved_twpc,
+            auto_approve_mode=resolved_auto_approve,
         )
         logger.debug("autopilot start: 已刷新共享内存状态 novel=%s", novel_id)
     except Exception as e:
@@ -1296,12 +1310,14 @@ async def start_autopilot(novel_id: str, body: StartRequest = StartRequest()):
                 max_auto_chapters=body.max_auto_chapters,
                 target_chapters=resolved_tc,
                 target_words_per_chapter=resolved_twpc,
+                auto_approve_mode=resolved_auto_approve,
             )
             logger.info(
-                "autopilot start: novel_id=%s persisted RUNNING (DB) tc=%s twpc=%s",
+                "autopilot start: novel_id=%s persisted RUNNING (DB) tc=%s twpc=%s auto=%s",
                 novel_id,
                 resolved_tc,
                 resolved_twpc,
+                resolved_auto_approve,
             )
         except Exception as e:
             logger.warning("autopilot start DB 持久化失败（共享内存已生效）: %s", e)
@@ -1325,6 +1341,7 @@ async def start_autopilot(novel_id: str, body: StartRequest = StartRequest()):
         "current_stage": next_stage,
         "target_chapters": resolved_tc,
         "target_words_per_chapter": resolved_twpc,
+        "auto_approve_mode": resolved_auto_approve,
     }
 
 
@@ -2135,6 +2152,24 @@ async def autopilot_chapter_stream(novel_id: str):
                     if chunks:
                         combined = "".join(chunks)
                         if combined:
+                            chapter_number = None
+                            if shared:
+                                raw_chapter = shared.get("current_chapter_number")
+                                if raw_chapter is None:
+                                    raw_chapter = shared.get("_cached_current_chapter_number")
+                                try:
+                                    chapter_number = int(raw_chapter) if raw_chapter is not None else None
+                                except (TypeError, ValueError):
+                                    chapter_number = None
+                            if chapter_number is not None and chapter_number != last_chapter_number:
+                                start_event = {
+                                    "type": "chapter_start",
+                                    "message": f"开始撰写第 {chapter_number} 章正文",
+                                    "timestamp": datetime.now().isoformat(),
+                                    "metadata": {"chapter_number": chapter_number},
+                                }
+                                yield f"data: {json.dumps(start_event, ensure_ascii=False)}\n\n"
+                                last_chapter_number = chapter_number
                             beat_idx = (shared.get("current_beat_index", 0) or 0) if shared else 0
                             event = {
                                 "type": "chapter_chunk",
@@ -2143,6 +2178,7 @@ async def autopilot_chapter_stream(novel_id: str):
                                 "metadata": {
                                     "chunk": combined,
                                     "beat_index": beat_idx,
+                                    "chapter_number": chapter_number,
                                 },
                             }
                             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -2263,6 +2299,7 @@ async def autopilot_chapter_stream(novel_id: str):
                             "metadata": {
                                 "chunk": combined,
                                 "beat_index": beat_idx,
+                                "chapter_number": last_chapter_number,
                             },
                         }
                         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"

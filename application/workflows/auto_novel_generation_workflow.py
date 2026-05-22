@@ -185,6 +185,8 @@ _CONTEXT_SECTION_LIMITS = {
     "layer3_text": 800,
 }
 _CONTEXT_FOCUS_LIMIT = 600
+_NOVEL_STYLE_LOCK_LIMIT = 1800
+_NOVEL_TAG_LOCK_LIMIT = 520
 
 
 def _normalize_context_lines(text: str) -> List[str]:
@@ -496,6 +498,7 @@ class AutoNovelGenerationWorkflow:
         self._current_chapter_number: int = 0
         self._current_character_canon_contract: str = ""
         self._current_profile_lock: str = ""
+        self._current_novel_tags_lock: str = ""
         
         # 强制初始化 StateExtractor（如果未提供）
         if state_extractor is None:
@@ -536,6 +539,58 @@ class AutoNovelGenerationWorkflow:
         self._theme_integrator = None
         self._initialize_theme()
 
+    @staticmethod
+    def _split_compact_tags(*values: str) -> list[str]:
+        tags: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            for item in re.split(r"[/／>|＞,，、;；\s]+", str(value or "")):
+                tag = item.strip()
+                if not tag or tag in seen:
+                    continue
+                seen.add(tag)
+                tags.append(tag)
+        return tags
+
+    def _load_novel_tags_lock(self, novel_id: str) -> str:
+        """Load the short front-end genre/world tags as a hard prose signal."""
+        try:
+            novel = self.context_builder.novel_repository.get_by_id(NovelId(novel_id))
+            if not novel:
+                return ""
+            premise = str(getattr(novel, "premise", "") or "")
+            genre, world = parse_genre_world_from_premise(premise)
+            lines: list[str] = []
+            if genre:
+                lines.append(f"- 市场分区/题材标签：{genre}")
+            if world:
+                lines.append(f"- 世界观基调：{world}")
+            tag_list = self._split_compact_tags(genre, world)
+            if tag_list:
+                lines.append(f"- 标签清单：{'、'.join(tag_list[:12])}")
+            if not lines:
+                return ""
+            body = "\n".join(lines)
+            if len(body) > _NOVEL_TAG_LOCK_LIMIT:
+                body = body[: _NOVEL_TAG_LOCK_LIMIT - 3].rstrip() + "..."
+            return (
+                "【小说标签与类型承诺】\n"
+                f"{body}\n"
+                "执行要求：这些短标签来自建书前端选择，是正文生成的最高优先级题材锚点之一；"
+                "开篇、冲突、能力规则、世界质感和读者预期必须稳定兑现，不要写成无类型感的通用剧情。"
+                "未在用户梗概或标签中明示的相邻热门题材，不得自动混入；例如都市不自动赛博废土，玄幻不自动科幻机甲，"
+                "悬疑不自动灵异神怪，言情不自动权谋争霸，科幻不自动修仙玄幻。混搭只能服务已给出的主类型承诺。"
+            )
+        except Exception as exc:
+            logger.debug("读取小说标签锁失败 novel=%s: %s", novel_id, exc)
+            return ""
+
+    def _activate_novel_generation_locks(self, novel_id: str) -> None:
+        """Activate per-novel locks before any chapter prompt is built."""
+        self._current_novel_id = novel_id
+        self._current_profile_lock = self._load_profile_lock_for_novel(novel_id)
+        self._current_novel_tags_lock = self._load_novel_tags_lock(novel_id)
+
     def _load_profile_lock_for_novel(self, novel_id: str) -> str:
         """Load the saved archive profile and activate its genre rules."""
         try:
@@ -554,6 +609,71 @@ class AutoNovelGenerationWorkflow:
         except Exception as exc:
             logger.debug("读取章节生成档案锁失败 novel=%s: %s", novel_id, exc)
             return ""
+
+    def _load_bible_style_guide(self, novel_id: str) -> str:
+        """Load compact Bible style notes for the chapter prose prompt."""
+        if not self.bible_repository:
+            return ""
+
+        try:
+            bible = self.bible_repository.get_by_novel_id(NovelId(novel_id))
+            if not bible:
+                return ""
+
+            style_lines: list[str] = []
+            for note in getattr(bible, "style_notes", []) or []:
+                content = str(getattr(note, "content", "") or "").strip()
+                if not content:
+                    continue
+                category = str(getattr(note, "category", "") or "").strip()
+                prefix = f"{category}：" if category else ""
+                style_lines.append(f"- {prefix}{content[:500]}")
+                if len("\n".join(style_lines)) >= 1000:
+                    break
+            return "\n".join(style_lines)[:1200]
+        except Exception as exc:
+            logger.debug("读取 Bible 文风公约失败 novel=%s: %s", novel_id, exc)
+            return ""
+
+    def _build_novel_style_lock(
+        self,
+        *,
+        style_summary: str = "",
+        theme_persona: str = "",
+        theme_rules: str = "",
+        format_rules: str = "",
+    ) -> str:
+        """Compress long-lived genre/style constraints into one front-loaded block."""
+        parts: list[str] = []
+        if self._current_profile_lock:
+            parts.append(self._current_profile_lock.strip())
+
+        bible_style = self._load_bible_style_guide(self._current_novel_id)
+        if bible_style:
+            parts.append(f"【Bible 文风公约】\n{bible_style}")
+
+        if style_summary.strip():
+            parts.append(f"【声纹/句法摘要】\n{style_summary.strip()[:600]}")
+
+        theme_block = "\n".join(
+            block.strip()
+            for block in (theme_persona, theme_rules, format_rules)
+            if block and block.strip()
+        )
+        if theme_block:
+            parts.append(f"【题材专项规则】\n{theme_block[:800]}")
+
+        if not parts:
+            return ""
+
+        body = "\n\n".join(parts)
+        if len(body) > _NOVEL_STYLE_LOCK_LIMIT:
+            body = body[: _NOVEL_STYLE_LOCK_LIMIT - 3].rstrip() + "..."
+        return (
+            f"{body}\n\n"
+            "执行要求：以上是全书长期约束，不是临时建议。正文必须稳定遵守题材承诺、世界观基调、叙述人称、句法节奏和商业网文阅读感；"
+            "不得突然改成设定说明、剧本分镜、状态面板、散文化独白或无关题材腔调。"
+        )
 
     def _initialize_theme(self) -> None:
         """延迟初始化 Theme 集成器"""
@@ -640,6 +760,10 @@ class AutoNovelGenerationWorkflow:
 
         托管守护进程与 HTTP 接口应复用此方法，避免「两套基建」。
         """
+        self._current_novel_id = novel_id
+        self._current_chapter_number = chapter_number
+        self._activate_novel_generation_locks(novel_id)
+
         storyline_context = self._get_storyline_context(novel_id, chapter_number)
         plot_tension = self._get_plot_tension(novel_id, chapter_number)
         payload = self.context_builder.build_structured_context(
@@ -666,6 +790,8 @@ class AutoNovelGenerationWorkflow:
             "style_summary": style_summary,
             "voice_anchors": voice_anchors,
             "character_canon_contract": character_canon_contract,
+            "novel_tags": self._current_novel_tags_lock,
+            "novel_style_lock": self._build_novel_style_lock(style_summary=style_summary),
         }
 
     def _resolve_target_chapter_words(self, novel_id: str) -> int:
@@ -736,6 +862,10 @@ class AutoNovelGenerationWorkflow:
 
         供全托管等场景在「故事线/张力等」子步骤异常时保持与主路径一致的上下文形态。
         """
+        self._current_novel_id = novel_id
+        self._current_chapter_number = chapter_number
+        self._activate_novel_generation_locks(novel_id)
+
         payload = self.context_builder.build_structured_context(
             novel_id=novel_id,
             chapter_number=chapter_number,
@@ -779,6 +909,8 @@ class AutoNovelGenerationWorkflow:
             "style_summary": style_summary,
             "voice_anchors": voice_anchors,
             "character_canon_contract": character_canon_contract,
+            "novel_tags": self._current_novel_tags_lock,
+            "novel_style_lock": self._build_novel_style_lock(style_summary=style_summary),
         }
 
     async def post_process_generated_chapter(
@@ -1426,6 +1558,16 @@ class AutoNovelGenerationWorkflow:
         final_has_landing = bool(re.search(landed_hook_pattern, final_paragraph))
         if (final_dialogue_from_new_source or final_action_starts) and not (final_has_result or final_has_landing):
             reasons.append("章节结尾停在新事件刚出现的位置，缺少信息确认、目标成败、代价、选择、关系变化或危机升级等阶段性结果")
+        pending_procedure = re.search(
+            r"(请|传|召|等|待|叫|宣|宣布|交给|送去|带去|押去)[^。！？]{0,80}"
+            r"(鉴师|长老|执事|族老|堂主|审判|审问|鉴定|检测|复核|裁决|宣判|处置|验明|查验)",
+            final_paragraph,
+        )
+        if pending_procedure and not re.search(
+            r"(结果|结论|确认|证实|判定|定为|剥夺|逐出|暂入|发配|处置|落定|当场宣布|宣判)",
+            final_paragraph,
+        ):
+            reasons.append("章节结尾停在鉴定、宣判、审问或处置即将发生的位置，下一步结果未兑现")
         return reasons
 
     def _build_quality_gate(
@@ -1772,7 +1914,7 @@ class AutoNovelGenerationWorkflow:
         # ★ V6: 缓存当前 novel_id/chapter_number 供 _build_prompt 中 MemoryEngine 使用
         self._current_novel_id = novel_id
         self._current_chapter_number = chapter_number
-        self._current_profile_lock = self._load_profile_lock_for_novel(novel_id)
+        self._activate_novel_generation_locks(novel_id)
 
         logger.info("阶段 1-2: 规划 + 结构化上下文（prepare_chapter_generation）")
         bundle = self.prepare_chapter_generation(
@@ -2125,7 +2267,7 @@ class AutoNovelGenerationWorkflow:
             context = bundle["context"]
             self._current_novel_id = novel_id
             self._current_chapter_number = chapter_number
-            self._current_profile_lock = self._load_profile_lock_for_novel(novel_id)
+            self._activate_novel_generation_locks(novel_id)
             self._current_character_canon_contract = bundle.get("character_canon_contract") or ""
             context_tokens = bundle["context_tokens"]
             logger.info(f"  ✓ 上下文已构建: {len(context)} 字符, 约 {context_tokens} tokens")
@@ -2497,7 +2639,12 @@ class AutoNovelGenerationWorkflow:
                     "chapter_number": chapter_number,
                 },
             )
-            outline_prompt = Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
+            outline_prompt = Prompt(
+                system=rendered.get("system", ""),
+                user=rendered.get("user", ""),
+                node_key=_CHAPTER_OUTLINE_SUGGEST_NODE_KEY,
+                source="workflow.outline_suggest",
+            )
             cfg = GenerationConfig(max_tokens=1024, temperature=0.7)
             out = await self.llm_service.generate(outline_prompt, cfg)
             text = strip_reasoning_artifacts((out.content or "").strip())
@@ -2845,6 +2992,13 @@ class AutoNovelGenerationWorkflow:
             except Exception as e:
                 logger.debug(f"Theme 增强构建失败: {e}")
 
+        novel_style_lock = self._build_novel_style_lock(
+            style_summary=ss,
+            theme_persona=theme_persona,
+            theme_rules=theme_rules,
+            format_rules=format_rules,
+        )
+
         # ★★★ 爽文引擎: 动态 Prompt 模板方案 ★★★
         # 架构决策：不在 autopilot_daemon 中硬编码规则引擎，
         # 而是在 workflow 的 Prompt 构建层注入动态爽文约束。
@@ -2873,6 +3027,8 @@ class AutoNovelGenerationWorkflow:
         # SafeDict: 用户在提示词广场编辑模板时可能引入未知变量，
         # 需要安全降级——未匹配的变量保留为 {name} 占位符，而非抛出 KeyError
         system_vars = {
+            "novel_tags": self._current_novel_tags_lock,
+            "novel_style_lock": novel_style_lock,
             "theme_persona": theme_persona,
             "theme_rules": theme_rules,
             "planning_section": planning_section,
@@ -2910,6 +3066,12 @@ class AutoNovelGenerationWorkflow:
         if shuangwen_directive.strip() and "爽文引擎写作目标" not in system_message:
             system_message = system_message.rstrip() + "\n\n" + shuangwen_directive
 
+        if novel_style_lock and "本书题材与文风锁" not in system_message:
+            system_message = system_message.rstrip() + "\n\n【本书题材与文风锁】\n" + novel_style_lock
+
+        if self._current_novel_tags_lock and "小说标签与类型承诺" not in system_message:
+            system_message = system_message.rstrip() + "\n\n" + self._current_novel_tags_lock
+
         if "人名硬约束" not in system_message:
             system_message = system_message.rstrip() + "\n\n" + _render_generation_prompt_text(
                 _CHAPTER_NAME_CANON_GUARD_NODE_KEY,
@@ -2928,7 +3090,11 @@ class AutoNovelGenerationWorkflow:
         beat_section_intro = "见下方【节拍】补充；只写当前节拍正文并自然承接同章已生成内容。" if beat_mode else "非分节拍生成；按本章大纲写完整章节正文。"
         user_message = _safe_format(
             user_template,
-            {"outline": outline, "beat_section": beat_section_intro},
+            {
+                "outline": outline,
+                "context": context,
+                "beat_section": beat_section_intro,
+            },
         )
         user_message = re.sub(r"结尾别收干净。.*?让读者非看下一章不可。?", "", user_message)
         user_message = re.sub(r"对话说到一半|一句话说到一半停了", "用未解决问题或新代价作为钩子", user_message)
@@ -3010,7 +3176,12 @@ class AutoNovelGenerationWorkflow:
 
         user_message += "\n\n开始撰写："
 
-        return Prompt(system=system_message, user=user_message)
+        return Prompt(
+            system=system_message,
+            user=user_message,
+            node_key=_WORKFLOW_CHAPTER_GEN_NODE_KEY,
+            source="workflow.chapter_generation",
+        )
 
     # ─── CPMS 模板获取辅助方法 ───
 

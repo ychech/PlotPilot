@@ -44,6 +44,12 @@ _macro_plan_progress_store: Dict[str, Dict] = {}
 _macro_plan_result_store: Dict[str, Dict] = {}
 _act_chapters_llm_stream_store: Dict[str, str] = {}
 
+_ACT_CONTEXT_PROFILE_LIMIT = 500
+_ACT_CONTEXT_PREVIOUS_LIMIT = 300
+_ACT_CONTEXT_ACT_DESC_LIMIT = 360
+_ACT_CONTEXT_WORLDVIEW_LIMIT = 700
+_ACT_CONTEXT_ITEM_LIMIT = 120
+
 
 def _macro_plan_progress_shared_key(novel_id: str) -> str:
     """与 novel:xxx 隔离，避免与共享内存里小说载荷键冲突。"""
@@ -1527,6 +1533,7 @@ class ContinuousPlanningService:
             raise ValueError(f"幕节点不存在: {act_id}")
 
         await self._remove_chapter_children_of_act(act_id)
+        self._wait_persistence_queue_idle_for_act_planning("旧章节删除")
 
         novel_id_str = act_node.novel_id
         novel_id_vo = NovelId(novel_id_str)
@@ -1538,6 +1545,7 @@ class ContinuousPlanningService:
         )
         if pruned:
             logger.info("[ActPlanning] novel=%s 已对齐全书正文↔结构，删行 %s 条", novel_id_str, pruned)
+            self._wait_persistence_queue_idle_for_act_planning("树外正文清理")
 
         chapter_nums_on_tree = collect_structure_chapter_numbers(self.story_node_repo, novel_id_str)
         next_global_number = (max(chapter_nums_on_tree) + 1) if chapter_nums_on_tree else 1
@@ -1605,6 +1613,16 @@ class ContinuousPlanningService:
             "created_elements": len(created_elements),
             "message": f"已写入 {len(created_chapters)} 个章节（本幕旧规划已替换）",
         }
+
+    def _wait_persistence_queue_idle_for_act_planning(self, label: str) -> None:
+        try:
+            from application.engine.services.persistence_queue import get_persistence_queue
+
+            pq = get_persistence_queue()
+            if pq is not None:
+                pq.wait_until_idle(timeout=5.0)
+        except Exception as e:
+            logger.debug("[ActPlanning] 等待%s队列排空失败（继续执行）: %s", label, e)
 
     # ==================== AI 续规划 ====================
 
@@ -1851,6 +1869,21 @@ class ContinuousPlanningService:
             "outline": outline,
         }
 
+    @staticmethod
+    def _compact_text(value: object, limit: int) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if limit <= 0 or len(text) <= limit:
+            return text
+        cut = text[:limit].rstrip()
+        boundary = max(cut.rfind(p) for p in ("。", "！", "？", ".", "!", "?"))
+        if boundary >= max(24, int(limit * 0.5)):
+            return cut[: boundary + 1].strip()
+        return cut[: max(0, limit - 3)].rstrip() + "..."
+
+    @staticmethod
+    def _estimate_chars(value: int) -> int:
+        return max(0, int(value))
+
     def _merged_elements_dict(self, chapter_row: Dict) -> Dict:
         """提示词里人物/地点在 chapters[].characters；落库时期望 elements.characters 为带 id 的对象列表。"""
         merged: Dict = {}
@@ -2060,7 +2093,12 @@ class ContinuousPlanningService:
         }
         rendered = render_prompt(PLANNING_QUICK_MACRO, variables)
         if rendered and (rendered.get("system") or rendered.get("user")):
-            return Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
+            return Prompt(
+                system=rendered.get("system", ""),
+                user=rendered.get("user", ""),
+                node_key=PLANNING_QUICK_MACRO,
+                source="continuous_planning.quick_macro",
+            )
 
         logger.warning("planning-quick-macro 渲染失败，返回空 Prompt")
         return Prompt(system="", user="")
@@ -2136,7 +2174,12 @@ class ContinuousPlanningService:
         """渲染规划类 CPMS node；提示词文本不在业务代码兜底。"""
         rendered = render_prompt(node_key, variables)
         if rendered and (rendered.get("system") or rendered.get("user")):
-            return Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
+            return Prompt(
+                system=rendered.get("system", ""),
+                user=rendered.get("user", ""),
+                node_key=node_key,
+                source="continuous_planning",
+            )
         logger.warning("%s 渲染失败，返回空 Prompt", node_key)
         return Prompt(system="", user="")
 
@@ -2351,22 +2394,66 @@ class ContinuousPlanningService:
     def _build_act_planning_prompt(self, act_node: StoryNode, bible_context: Dict, previous_summary: Optional[str], chapter_count: int) -> Prompt:
         """构建幕级章节规划提示词；爽点/伏笔契约由 planning-act node 管理。"""
 
-        # 构建上下文信息
-        context_parts = [f"幕信息：《{act_node.title}》"]
+        context_parts = [
+            "【变量说明】",
+            (
+                f"context 是压缩后的幕级规划输入，约 {self._estimate_chars(_ACT_CONTEXT_ACT_DESC_LIMIT + _ACT_CONTEXT_WORLDVIEW_LIMIT + 600)} 字以内；"
+                "只包含本幕目标、前情、世界观摘要、可用人物与地点，不包含正文原文。"
+            ),
+            f"chapter_count 是本幕需要规划的章节数：{chapter_count}。",
+            "",
+            f"【本幕信息（约 {_ACT_CONTEXT_ACT_DESC_LIMIT} 字内）】",
+            f"标题：《{self._compact_text(act_node.title, 80)}》",
+        ]
         if act_node.description:
-            context_parts.append(f"幕简介：{act_node.description}")
+            context_parts.append(
+                f"幕简介：{self._compact_text(act_node.description, _ACT_CONTEXT_ACT_DESC_LIMIT)}"
+            )
 
         if previous_summary:
-            context_parts.append(f"\n前情提要：{previous_summary}")
+            context_parts.append(
+                f"\n【前情提要（约 {_ACT_CONTEXT_PREVIOUS_LIMIT} 字内）】\n"
+                f"{self._compact_text(previous_summary, _ACT_CONTEXT_PREVIOUS_LIMIT)}"
+            )
 
-        # 添加 Bible 信息
+        if bible_context.get("profile_lock"):
+            context_parts.append(
+                f"\n【故事内核锁摘要（约 {_ACT_CONTEXT_PROFILE_LIMIT} 字内）】\n"
+                f"{self._compact_text(bible_context['profile_lock'], _ACT_CONTEXT_PROFILE_LIMIT)}"
+            )
+
+        if bible_context.get("worldview"):
+            context_parts.append(
+                f"\n【世界观摘要（约 {_ACT_CONTEXT_WORLDVIEW_LIMIT} 字内）】\n"
+                f"{self._compact_text(bible_context['worldview'], _ACT_CONTEXT_WORLDVIEW_LIMIT)}"
+            )
+
         if bible_context.get("characters"):
-            char_list = [f"- {c.get('name', 'Unknown')} (ID: {c.get('id', 'N/A')})" for c in bible_context["characters"][:5]]
-            context_parts.append(f"\n可用人物：\n" + "\n".join(char_list))
+            char_list = []
+            for c in bible_context["characters"][:6]:
+                desc = self._compact_text(
+                    "；".join(
+                        part for part in [
+                            str(c.get("role") or "").strip(),
+                            str(c.get("description") or "").strip(),
+                        ]
+                        if part
+                    ),
+                    _ACT_CONTEXT_ITEM_LIMIT,
+                )
+                char_list.append(
+                    f"- {c.get('name', 'Unknown')} (ID: {c.get('id', 'N/A')}): {desc or '可用角色'}"
+                )
+            context_parts.append(f"\n【可用人物（最多6个，每个约 {_ACT_CONTEXT_ITEM_LIMIT} 字内）】\n" + "\n".join(char_list))
 
         if bible_context.get("locations"):
-            loc_list = [f"- {l.get('name', 'Unknown')} (ID: {l.get('id', 'N/A')})" for l in bible_context["locations"][:5]]
-            context_parts.append(f"\n可用地点：\n" + "\n".join(loc_list))
+            loc_list = []
+            for l in bible_context["locations"][:6]:
+                loc_list.append(
+                    f"- {l.get('name', 'Unknown')} (ID: {l.get('id', 'N/A')}): "
+                    f"{self._compact_text(l.get('description') or '', _ACT_CONTEXT_ITEM_LIMIT) or '可用地点'}"
+                )
+            context_parts.append(f"\n【可用地点（最多6个，每个约 {_ACT_CONTEXT_ITEM_LIMIT} 字内）】\n" + "\n".join(loc_list))
 
         context = "\n".join(context_parts)
 
@@ -2577,4 +2664,9 @@ class ContinuousPlanningService:
                 "next_act_number": current_act.number + 1,
             },
         )
-        return Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
+        return Prompt(
+            system=rendered.get("system", ""),
+            user=rendered.get("user", ""),
+            node_key=PLANNING_NEXT_ACT_DUAL_TRACK,
+            source="continuous_planning.next_act_dual_track",
+        )

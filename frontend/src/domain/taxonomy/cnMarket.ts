@@ -9,9 +9,9 @@ export function marketMajorThemeGenre(root: TaxonomyNode, leaf: TaxonomyNode, lo
   return `${pickLocaleLabel(root, locale)} / ${pickLocaleLabel(leaf, locale)}`
 }
 
-/** 世界观正文：取自父节点 facets.world_tone（子节点可后续扩展同名 facet 覆盖） */
-export function worldToneForSelection(root: TaxonomyNode): string {
-  const w = root.facets?.world_tone?.trim()
+/** 世界观正文：子主题 facets.world_tone 优先，其次回退到父节点。 */
+export function worldToneForSelection(root: TaxonomyNode, leaf?: TaxonomyNode): string {
+  const w = leaf?.facets?.world_tone?.trim() || root.facets?.world_tone?.trim()
   return w || ''
 }
 

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import itertools
 import logging
+import os
+from datetime import datetime
+from pathlib import Path
 from typing import AsyncIterator, Optional
 
 from application.ai.llm_control_service import LLMControlService, LLMProfile
@@ -18,6 +22,7 @@ from infrastructure.ai.url_utils import (
 )
 
 _DEFAULT_CONFIG = GenerationConfig()
+_PROMPT_LOG_COUNTER = itertools.count(1)
 logger = logging.getLogger(__name__)
 
 
@@ -162,11 +167,13 @@ class DynamicLLMService(LLMService):
     async def generate(self, prompt: Prompt, config: GenerationConfig) -> GenerationResult:
         provider = self._resolve_provider()
         effective_config = self._merge_config(config, provider)
+        _write_full_prompt_log("generate", provider, prompt, effective_config)
         return await provider.generate(prompt, effective_config)
 
     async def stream_generate(self, prompt: Prompt, config: GenerationConfig) -> AsyncIterator[str]:
         provider = self._resolve_provider()
         effective_config = self._merge_config(config, provider)
+        _write_full_prompt_log("stream", provider, prompt, effective_config)
         async for chunk in provider.stream_generate(prompt, effective_config):
             yield chunk
 
@@ -183,3 +190,43 @@ class DynamicLLMService(LLMService):
         finally:
             self._cached_provider = None
             self._cached_key = None
+
+
+def _write_full_prompt_log(
+    mode: str,
+    provider: LLMService,
+    prompt: Prompt,
+    config: GenerationConfig,
+) -> None:
+    """Append the exact prompt sent to the provider for local prompt auditing."""
+    log_file = os.getenv("FULL_PROMPT_LOG_FILE", "logs/prompts.full.log").strip()
+    if not log_file:
+        return
+
+    try:
+        path = Path(log_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_no = next(_PROMPT_LOG_COUNTER)
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        system = prompt.system or ""
+        user = prompt.user or ""
+        provider_name = provider.__class__.__name__
+        node_key = (getattr(prompt, "node_key", "") or "").strip() or "unknown"
+        source = (getattr(prompt, "source", "") or "").strip()
+
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("\n")
+            handle.write("=" * 100 + "\n")
+            handle.write(
+                f"[{prompt_no}] {timestamp} mode={mode} provider={provider_name} "
+                f"model={config.model} max_tokens={config.max_tokens} temperature={config.temperature}\n"
+            )
+            handle.write(f"node_key={node_key} source={source or '-'}\n")
+            handle.write(f"system_chars={len(system)} user_chars={len(user)}\n")
+            handle.write("----- SYSTEM -----\n")
+            handle.write(system)
+            handle.write("\n----- USER -----\n")
+            handle.write(user)
+            handle.write("\n")
+    except Exception as exc:
+        logger.debug("写入完整提示词日志失败（可忽略）: %s", exc)

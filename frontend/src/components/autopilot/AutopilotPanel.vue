@@ -967,7 +967,6 @@ async function start() {
   try {
     const newTarget = startConfig.value.target_chapters
     const newWpc = startConfig.value.target_words_per_chapter
-    const currentAutoApprove = status.value?.auto_approve_mode ?? false
     const newAutoApprove = startConfig.value.auto_approve_mode
 
     // 🔥 乐观更新：立即更新本地状态，用户无需等待后端响应
@@ -988,23 +987,9 @@ async function start() {
     message.success('自动驾驶已启动')
 
     // 目标章数 / 每章字数改由 POST .../start 与 RUNNING 原子落库（避免与 PUT /novels 并行竞态导致仍用默认字数）
+    // 全自动模式也随 start 原子落库，避免守护进程先读到旧值后停在审阅点。
 
-    // 并行发送所有请求
-    const requests = []
-
-    if (currentAutoApprove !== newAutoApprove) {
-      requests.push(
-        fetch(resolveHttpUrl(`/api/v1/novels/${props.novelId}/auto-approve-mode`), {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ auto_approve_mode: newAutoApprove }),
-        }).catch(err => {
-          console.warn('[AutopilotPanel] 更新自动审阅模式失败:', err)
-        })
-      )
-    }
-
-    requests.push(
+    const startRequest =
       fetch(resolveHttpUrl(`${autopilotApiRoot()}/start`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1012,6 +997,7 @@ async function start() {
           max_auto_chapters: startConfig.value.max_auto_chapters,
           target_chapters: newTarget,
           target_words_per_chapter: newWpc,
+          auto_approve_mode: newAutoApprove,
         }),
       }).then(res => {
         if (!res.ok) {
@@ -1027,11 +1013,10 @@ async function start() {
         emit('status-change', prevStatus)
         message.error('启动请求失败，请重试')
       })
-    )
 
-    // 🔥 不 await 所有请求完成，用户已经看到"已启动"的反馈
+    // 🔥 不 await 请求完成，用户已经看到"已启动"的反馈
     // 后续 fetchStatus 轮询会自动校准状态
-    Promise.allSettled(requests).then(() => {
+    startRequest.finally(() => {
       void fetchStatus()  // 请求全部结束后拉一次真实状态
     })
   } finally {

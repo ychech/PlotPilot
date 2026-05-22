@@ -219,7 +219,12 @@ class ChapterBridgeService:
         from infrastructure.ai.prompt_utils import render_prompt
         variables = {"chapter_text": body}
         rendered = render_prompt(_BRIDGE_EXTRACT_NODE_KEY, variables)
-        prompt = Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
+        prompt = Prompt(
+            system=rendered.get("system", ""),
+            user=rendered.get("user", ""),
+            node_key=_BRIDGE_EXTRACT_NODE_KEY,
+            source="chapter_bridge.extract_bridge",
+        )
         config = GenerationConfig(max_tokens=512, temperature=0.3)
 
         result = await self._llm.generate(prompt, config)
@@ -255,6 +260,21 @@ class ChapterBridgeService:
                 suspense_candidates.append(s)
         if suspense_candidates:
             bridge.suspense_hook = suspense_candidates[-1][:100]
+
+        pending_matches = re.findall(
+            r"(请|传|召|等|待|叫|宣|宣布|交给|送去|带去|押去)[^。！？]{0,80}"
+            r"(鉴师|长老|执事|族老|堂主|审判|审问|鉴定|检测|复核|裁决|宣判|处置|验明|查验)",
+            text[-800:],
+        )
+        if pending_matches:
+            pending_text = re.search(
+                r"[^。！？]{0,120}(?:请|传|召|等|待|叫|宣|宣布|交给|送去|带去|押去)[^。！？]{0,100}"
+                r"(?:鉴师|长老|执事|族老|堂主|审判|审问|鉴定|检测|复核|裁决|宣判|处置|验明|查验)[^。！？]{0,80}",
+                text[-900:],
+            )
+            bridge.unfinished_actions = (pending_text.group(0) if pending_text else "等待鉴定/处置结果")[:160]
+            if not bridge.suspense_hook:
+                bridge.suspense_hook = "上一章留下鉴定、审问、宣判或处置结果，下一章需要先兑现阶段结果。"
 
         # 情感余韵：搜索情感关键词
         emotion_keywords = {
@@ -338,15 +358,28 @@ class ChapterBridgeService:
 
         if prev_bridge.unfinished_actions:
             parts.append(f"🎬 未完成：{prev_bridge.unfinished_actions}")
-            parts.append("  你可以选择延续此动作，也可以暂且搁置、从另一条线开篇。\n")
+            if self._requires_direct_resolution(prev_bridge.unfinished_actions):
+                parts.append("  这是必须兑现的流程结果：本章前三段先交代它的阶段结果，再转入新地点/新任务。\n")
+            else:
+                parts.append("  你可以选择延续此动作，也可以暂且搁置、从另一条线开篇。\n")
 
         # V9: 删除了原来的"首段衔接铁律"4条禁令
         # 替换为一段开放性的创作引导
         parts.append("━━━ 衔接建议 ━━━")
-        parts.append("你可以在前三句内建立与前章的连接（情绪/画面/悬念），也可以用时间跳跃或视角切换开篇。")
-        parts.append("两种写法都是好的小说技法——选择最适合当前叙事节奏的方式。")
+        if self._requires_direct_resolution(prev_bridge.unfinished_actions or prev_bridge.suspense_hook):
+            parts.append("上一章留下的是流程性结果等待，不适合直接跳场；先兑现结果，再做时间或空间转场。")
+        else:
+            parts.append("你可以在前三句内建立与前章的连接（情绪/画面/悬念），也可以用时间跳跃或视角切换开篇。")
+            parts.append("两种写法都是好的小说技法——选择最适合当前叙事节奏的方式。")
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _requires_direct_resolution(text: str) -> bool:
+        return bool(re.search(
+            r"(鉴师|鉴定|检测|复核|审问|审判|裁决|宣判|处置|验明|查验|请|传|召|等候|等待)",
+            text or "",
+        ))
 
     def build_bridge_summary_for_context(
         self,
@@ -416,7 +449,12 @@ class ChapterBridgeService:
         from infrastructure.ai.prompt_utils import render_prompt
         variables = {"bridge_data": bridge_summary, "chapter_opening": head}
         rendered = render_prompt(_BRIDGE_CHECK_NODE_KEY, variables)
-        prompt = Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
+        prompt = Prompt(
+            system=rendered.get("system", ""),
+            user=rendered.get("user", ""),
+            node_key=_BRIDGE_CHECK_NODE_KEY,
+            source="chapter_bridge.check_continuity",
+        )
         config = GenerationConfig(max_tokens=256, temperature=0.3)
 
         try:
@@ -454,7 +492,11 @@ class ChapterBridgeService:
         策略：用 LLM 重写首段（前 300 字），保持后文不变。
         最多修整 max_rounds 轮。
         """
-        if check_result.score >= 0.4 or not self._llm:  # V9: 从 0.6 降至 0.4，降低强制修整门槛
+        strict_bridge = self._requires_direct_resolution(
+            f"{prev_bridge.unfinished_actions} {prev_bridge.suspense_hook}"
+        )
+        threshold = 0.6 if strict_bridge else 0.4
+        if check_result.score >= threshold or not self._llm:
             return content
 
         stripped = content.strip()
@@ -497,7 +539,12 @@ class ChapterBridgeService:
             "original_opening": head,
         }
         rendered = render_prompt(_BRIDGE_FIX_NODE_KEY, variables)
-        prompt = Prompt(system=rendered.get("system", ""), user=rendered.get("user", ""))
+        prompt = Prompt(
+            system=rendered.get("system", ""),
+            user=rendered.get("user", ""),
+            node_key=_BRIDGE_FIX_NODE_KEY,
+            source="chapter_bridge.auto_fix_opening",
+        )
 
         config = GenerationConfig(max_tokens=512, temperature=0.4)
 

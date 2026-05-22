@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from typing import Dict, List, Optional
+import json
 
 from domain.bible.entities.bible import Bible
 from domain.worldbuilding.worldbuilding import Worldbuilding
@@ -55,6 +56,37 @@ _WB_SECTIONS: List[tuple[str, List[tuple[str, str]]]] = [
 ]
 
 
+def _worldbuilding_value_for_prompt(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return text
+    if not isinstance(parsed, dict):
+        return text
+
+    summary = str(parsed.get("summary") or "").strip()
+    quick = parsed.get("quick_ref") if isinstance(parsed.get("quick_ref"), dict) else {}
+    parts: List[str] = []
+    keywords = quick.get("keywords") if isinstance(quick.get("keywords"), list) else []
+    ladder = quick.get("ladder") if isinstance(quick.get("ladder"), list) else []
+    rules = quick.get("rules") if isinstance(quick.get("rules"), list) else []
+    costs = quick.get("costs") if isinstance(quick.get("costs"), list) else []
+    if keywords:
+        parts.append("关键词：" + "、".join(str(x) for x in keywords[:5] if str(x).strip()))
+    if ladder:
+        parts.append("结构：" + " / ".join(str(x) for x in ladder[:4] if str(x).strip()))
+    if rules:
+        parts.append("规则：" + "；".join(str(x) for x in rules[:3] if str(x).strip()))
+    if costs:
+        parts.append("代价：" + "；".join(str(x) for x in costs[:2] if str(x).strip()))
+    if summary:
+        parts.append("说明：" + summary)
+    return "；".join(part for part in parts if part).strip() or text
+
+
 def format_worldbuilding_for_prompt(wb: Optional[Worldbuilding]) -> str:
     """将 worldbuilding 表实体转为紧凑正文（仅非空字段）。"""
     if wb is None:
@@ -65,7 +97,7 @@ def format_worldbuilding_for_prompt(wb: Optional[Worldbuilding]) -> str:
     for title, fields in _WB_SECTIONS:
         block: List[str] = []
         for label, attr in fields:
-            val = (getattr(wb, attr, None) or "").strip()
+            val = _worldbuilding_value_for_prompt((getattr(wb, attr, None) or "").strip())
             if val:
                 block.append(f"- {label}：{val}")
         if block:

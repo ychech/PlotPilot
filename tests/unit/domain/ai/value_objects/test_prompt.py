@@ -11,6 +11,21 @@ def test_prompt_creation():
     )
     assert prompt.system == "你是一个小说创作助手"
     assert prompt.user == "请帮我写一个开头"
+    assert prompt.node_key == ""
+    assert prompt.source == ""
+
+
+def test_prompt_metadata_is_optional_and_preserved():
+    prompt = Prompt(
+        system="系统消息",
+        user="用户消息",
+        node_key="chapter-generation-main",
+        source="workflow.chapter_generation",
+    )
+
+    assert prompt.node_key == "chapter-generation-main"
+    assert prompt.source == "workflow.chapter_generation"
+    assert prompt.to_messages()[0]["content"] == "系统消息"
 
 
 def test_prompt_empty_user_raises_error():
